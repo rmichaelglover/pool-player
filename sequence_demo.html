@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Shot Sequence Demo</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#1a1a2e; color:#e0e0e0; font-family:Arial,sans-serif;
+       display:flex; flex-direction:column; align-items:center; padding:20px; }
+h1 { color:#c8a96e; margin-bottom:5px; }
+p.info { color:#999; font-size:13px; margin-bottom:12px; }
+canvas { border-radius:6px; box-shadow:0 8px 32px rgba(0,0,0,0.6); }
+#controls { margin-top:12px; display:flex; gap:12px; }
+button { padding:10px 25px; font-size:15px; font-weight:bold; border:none;
+         border-radius:6px; cursor:pointer; text-transform:uppercase; }
+#shootBtn { background:linear-gradient(#c44,#922); color:#fff; }
+#nextBtn { background:linear-gradient(#47a,#258); color:#fff; }
+#newBtn { background:linear-gradient(#4a7,#285); color:#fff; }
+#status { margin-top:10px; color:#c8a96e; font-size:14px; min-height:20px; }
+#stats { margin-top:5px; color:#888; font-size:12px; }
+</style>
+</head>
+<body>
+<h1>Shot Sequence Demo</h1>
+<p class="info">Network chooses which ball, which pocket, and draw/stop/follow for each shot in sequence.</p>
+<canvas id="table" width="880" height="480"></canvas>
+<div id="controls">
+  <button id="shootBtn">Shoot</button>
+  <button id="nextBtn">Plan Next</button>
+  <button id="newBtn">New Table</button>
+</div>
+<div id="status">Loading models...</div>
+<div id="stats"></div>
+
+<script>
+const TL=100, TW=50, R=1.125, S=8, RW=5, OX=RW*S, OY=RW*S;
+const POCKETS=[[0,0],[TL/2,0],[TL,0],[0,TW],[TL/2,TW],[TL,TW]];
+const POCKET_R=[2.5,2.75,2.5,2.5,2.75,2.5];
+const _mo=2.5*0.45, _smo=2.75*0.15;
+const PA=[[_mo,_mo],[TL/2,_smo],[TL-_mo,_mo],[_mo,TW-_mo],[TL/2,TW-_smo],[TL-_mo,TW-_mo]];
+const IDEAL=[[-1,-1],[0,-1],[1,-1],[-1,1],[0,1],[1,1]];
+const MAX_A=[65,50,65,65,50,65].map(d=>d*Math.PI/180);
+const SPIN_NAMES=['Stop','Follow','Draw'];
+const SPIN_COLORS=['#aaa','#4a7','#c44'];
+const BALL_COLORS=['#FFD700','#0000CC','#CC0000','#660099','#FF6600',
+                   '#007700','#800000','#111','#FFD700','#0000CC',
+                   '#CC0000','#660099','#FF6600','#007700','#800000'];
+
+// Physics
+const MU_ROLL=0.01, G_=386.09, CUSH_R=0.92, BALL_R=0.96, DT_=1/300, VT=0.15;
+
+let aimModel=null, seqModel=null;
+let cueBall={x:25,y:25}, balls=[], pocketed=new Set();
+let currentPlan=null; // {ballId, pocketIdx, spinType, ghost, aimAngle}
+let simulating=false, simBalls=null;
+let shotsTaken=0, shotsMade=0, runLength=0;
+const NUM_BALLS=15;
+
+// Load aim model (sequence selection is now purely geometric)
+fetch('js/aim_model.json').then(r=>r.json()).then(aim => {
+  aimModel = aim;
+  document.getElementById('status').textContent = 'Model loaded. Click "New Table" to start.';
+  newTable();
+});
+
+function tx(x){return x*S+OX;} function ty(y){return y*S+OY;}
+
+function nnForward(model, input) {
+  let x = input;
+  for (let i=0; i<model.layers.length; i+=2) {
+    const W=model.layers[i], b=model.layers[i+1];
+    const rows=W.shape[0], cols=W.shape[1];
+    const out=new Array(rows).fill(0);
+    for (let r=0;r<rows;r++) {
+      let s=b.data[r];
+      for (let c=0;c<cols;c++) s+=W.data[r][c]*x[c];
+      if (i<model.layers.length-2) out[r]=Math.max(0,s); // ReLU
+      else out[r]=s; // raw
+    }
+    x=out;
+  }
+  return x;
+}
+
+function getAimAngle(cx,cy,bx,by,px,py) {
+  const inp=[cx/TL,cy/TW,bx/TL,by/TW,px/TL,py/TW];
+  const out = nnForward(aimModel, inp);
+  const norm=Math.sqrt(out[0]*out[0]+out[1]*out[1])||0.001;
+  return Math.atan2(out[1]/norm, out[0]/norm);
+}
+
+function getObs() {
+  const obs=new Array(32).fill(-1);
+  obs[0]=cueBall.x/TL; obs[1]=cueBall.y/TW;
+  for (const b of balls) {
+    if (!pocketed.has(b.id) && b.id<=15) {
+      const idx=2+(b.id-1)*2;
+      obs[idx]=b.x/TL; obs[idx+1]=b.y/TW;
+    }
+  }
+  return obs;
+}
+
+function isPathClear(sx,sy,ex,ey,excludeIds) {
+  const dx=ex-sx, dy=ey-sy, len=Math.sqrt(dx*dx+dy*dy);
+  if(len<0.1) return true;
+  const nx=dx/len, ny=dy/len;
+  for (const b of balls) {
+    if (pocketed.has(b.id)||excludeIds.includes(b.id)) continue;
+    const bx=b.x-sx, by=b.y-sy;
+    const proj=bx*nx+by*ny;
+    if(proj<0){
+      if(bx*bx+by*by<4*R*R)return false;
+    }else if(proj>len){
+      const ex2=bx-dx,ey2=by-dy;
+      if(ex2*ex2+ey2*ey2<4*R*R)return false;
+    }else{
+      if (Math.abs(-bx*ny+by*nx)<2*R) return false;
+    }
+  }
+  return true;
+}
+
+function pocketApproachOk(bx,by,pidx) {
+  const px=PA[pidx][0],py=PA[pidx][1];
+  const dx=px-bx,dy=py-by,d=Math.sqrt(dx*dx+dy*dy);
+  if(d<0.01) return true;
+  const il=Math.sqrt(IDEAL[pidx][0]**2+IDEAL[pidx][1]**2);
+  const dot=(dx/d)*IDEAL[pidx][0]/il+(dy/d)*IDEAL[pidx][1]/il;
+  const angle=Math.acos(Math.max(-1,Math.min(1,dot)));
+  // Closer balls get more lenient angle (up to +20deg within 20 inches)
+  const bonus=Math.max(0,(20-d)/20)*(20*Math.PI/180);
+  return angle<(MAX_A[pidx]+bonus);
+}
+
+function bestPocketForBall(bx, by, bid) {
+  // Pick pocket with lowest cut angle (clear paths required)
+  let bestCA=999, bestP=null;
+  for (let p=0;p<6;p++) {
+    if (!pocketApproachOk(bx,by,p)) continue;
+    const px=PA[p][0],py=PA[p][1];
+    const tpx=px-bx,tpy=py-by,tpd=Math.sqrt(tpx*tpx+tpy*tpy);
+    if(tpd<0.1) continue;
+    const tnx=tpx/tpd,tny=tpy/tpd;
+    const gx=bx-tnx*2*R,gy=by-tny*2*R;
+    const cgd=Math.sqrt((gx-cueBall.x)**2+(gy-cueBall.y)**2);
+    if(cgd<0.1) continue;
+    const cdot=((gx-cueBall.x)/cgd)*tnx+((gy-cueBall.y)/cgd)*tny;
+    const ca=Math.acos(Math.max(-1,Math.min(1,cdot)))*180/Math.PI;
+    if(ca>75) continue;
+    if(!isPathClear(cueBall.x,cueBall.y,gx,gy,[bid])) continue;
+    if(!isPathClear(bx,by,px,py,[bid])) continue;
+    // Combined difficulty: cut angle + shot length
+    const cueToDist=Math.sqrt((gx-cueBall.x)**2+(gy-cueBall.y)**2);
+    const ballToPocket=Math.sqrt((px-bx)**2+(py-by)**2);
+    const difficulty=ca/75 + (cueToDist+ballToPocket)/(TL*1.5);
+    if(difficulty<bestCA) { bestCA=difficulty; bestP={p,gx,gy,ca}; }
+  }
+  return bestP;
+}
+
+function estimateCuePosition(ghost, aimDir, pocketDir, spinType) {
+  // Simplified geometric estimate of cue ball position after pocketing
+  // 0=stop: stay near ghost, 1=follow: continue toward pocket, 2=draw: reverse
+  const dists = [3, 20, 12]; // travel distances for stop/follow/draw
+  let dx, dy;
+  if (spinType === 0) { // stop
+    dx = -pocketDir[1] * dists[0]; dy = pocketDir[0] * dists[0];
+  } else if (spinType === 1) { // follow
+    dx = pocketDir[0] * dists[1]; dy = pocketDir[1] * dists[1];
+  } else { // draw
+    dx = -aimDir[0] * dists[2]; dy = -aimDir[1] * dists[2];
+  }
+  return [Math.max(R, Math.min(TL-R, ghost.x+dx)), Math.max(R, Math.min(TW-R, ghost.y+dy))];
+}
+
+function planShot() {
+  if (!aimModel) return;
+
+  // For each ball, find its best pocket and compute combined difficulty
+  // including 1-step lookahead for follow-up shot quality
+  let bestDiff=999, bestChoice=null;
+
+  for (const b of balls) {
+    if (pocketed.has(b.id)||b.id>15) continue;
+    const bp = bestPocketForBall(b.x, b.y, b.id);
+    if (!bp) continue;
+
+    const px=PA[bp.p][0], py=PA[bp.p][1];
+    const tpx=px-b.x, tpy=py-b.y, tpd=Math.sqrt(tpx*tpx+tpy*tpy)||0.001;
+    const pocketDir = [tpx/tpd, tpy/tpd];
+    const aimDx=bp.gx-cueBall.x, aimDy=bp.gy-cueBall.y;
+    const aimD=Math.sqrt(aimDx*aimDx+aimDy*aimDy)||0.001;
+    const aimDir = [aimDx/aimD, aimDy/aimD];
+
+    // Base difficulty (from pocket selection: cut angle + distance)
+    const cueToDist = Math.sqrt((bp.gx-cueBall.x)**2+(bp.gy-cueBall.y)**2);
+    const ballToPocket = Math.sqrt((px-b.x)**2+(py-b.y)**2);
+    const baseDiff = bp.ca/75 + (cueToDist+ballToPocket)/(TL*1.5);
+
+    // Try each spin type and evaluate follow-up
+    for (let s=0; s<3; s++) {
+      const cueFinal = estimateCuePosition({x:bp.gx,y:bp.gy}, aimDir, pocketDir, s);
+
+      // Find best follow-up shot from cueFinal
+      let bestFollowUp = 999;
+      for (const b2 of balls) {
+        if (pocketed.has(b2.id) || b2.id===b.id || b2.id>15) continue;
+        // Temporarily use cueFinal as cue position for evaluation
+        const savedCue = [cueBall.x, cueBall.y];
+        cueBall.x = cueFinal[0]; cueBall.y = cueFinal[1];
+        const bp2 = bestPocketForBall(b2.x, b2.y, b2.id);
+        cueBall.x = savedCue[0]; cueBall.y = savedCue[1];
+        if (bp2) {
+          const cd2 = Math.sqrt((bp2.gx-cueFinal[0])**2+(bp2.gy-cueFinal[1])**2);
+          const px2=PA[bp2.p][0],py2=PA[bp2.p][1];
+          const pd2 = Math.sqrt((px2-b2.x)**2+(py2-b2.y)**2);
+          const diff2 = bp2.ca/75 + (cd2+pd2)/(TL*1.5);
+          bestFollowUp = Math.min(bestFollowUp, diff2);
+        }
+      }
+
+      // Combined: current difficulty + follow-up (weighted less)
+      const combined = baseDiff + bestFollowUp * 0.3;
+      if (combined < bestDiff) {
+        bestDiff = combined;
+        bestChoice = {ballId:b.id, pocketIdx:bp.p, spinType:s,
+                      ghost:{x:bp.gx, y:bp.gy}, cutAngle:bp.ca};
+      }
+    }
+  }
+
+  if (!bestChoice) {
+    document.getElementById('status').textContent='No valid shot found!';
+    currentPlan=null; return;
+  }
+  const b=balls.find(b2=>b2.id===bestChoice.ballId);
+  bestChoice.aimAngle=getAimAngle(cueBall.x,cueBall.y,b.x,b.y,
+    PA[bestChoice.pocketIdx][0],PA[bestChoice.pocketIdx][1]);
+  currentPlan=bestChoice;
+  const pname=['TL','TS','TR','BL','BS','BR'][bestChoice.pocketIdx];
+  document.getElementById('status').textContent=
+    `Ball #${bestChoice.ballId} -> ${pname} (${SPIN_NAMES[bestChoice.spinType]}, cut ${bestChoice.cutAngle.toFixed(0)}deg, diff ${bestDiff.toFixed(2)}). Click "Shoot".`;
+}
+
+function shoot() {
+  if(simulating||!currentPlan) return;
+  const force=60, dx=Math.cos(currentPlan.aimAngle), dy=Math.sin(currentPlan.aimAngle);
+  // Initialize ALL balls for physics simulation
+  simBallState = {};
+  // Cue ball
+  simBallState[0] = {x:cueBall.x, y:cueBall.y, vx:force*dx, vy:force*dy, pocketed:false};
+  // All object balls
+  for (const b of balls) {
+    if (pocketed.has(b.id)) continue;
+    simBallState[b.id] = {x:b.x, y:b.y, vx:0, vy:0, pocketed:false};
+  }
+  simPocketed = new Set();
+  simulating=true; shotsTaken++;
+}
+let simBallState = {};
+let simPocketed = new Set();
+
+function simStep() {
+  if(!simBallState || Object.keys(simBallState).length===0) return;
+  const ids = Object.keys(simBallState).map(Number);
+
+  // Apply friction and move all balls
+  for (const id of ids) {
+    const b = simBallState[id];
+    if (b.pocketed) continue;
+    applyF(b);
+    b.x += b.vx * DT_;
+    b.y += b.vy * DT_;
+  }
+
+  // Ball-ball collisions (all pairs, with back-calculation)
+  for (let i = 0; i < ids.length; i++) {
+    const b1 = simBallState[ids[i]];
+    if (b1.pocketed) continue;
+    for (let j = i+1; j < ids.length; j++) {
+      const b2 = simBallState[ids[j]];
+      if (b2.pocketed) continue;
+      // Skip if both stationary
+      if (b1.vx*b1.vx+b1.vy*b1.vy < 0.001 && b2.vx*b2.vx+b2.vy*b2.vy < 0.001) continue;
+      const dx=b2.x-b1.x, dy=b2.y-b1.y, d2=dx*dx+dy*dy, md=2*R;
+      if (d2<md*md && d2>0.0001) {
+        const d=Math.sqrt(d2), ol=md-d;
+        const dvx=b1.vx-b2.vx, dvy=b1.vy-b2.vy;
+        const cs=(dvx*dx+dvy*dy)/d;
+        const dt2=cs>0.01?ol/cs:0;
+        const cx1=b1.x-b1.vx*dt2, cy1=b1.y-b1.vy*dt2;
+        const cx2=b2.x-b2.vx*dt2, cy2=b2.y-b2.vy*dt2;
+        const cdx=cx2-cx1, cdy=cy2-cy1, cd=Math.sqrt(cdx*cdx+cdy*cdy)||0.001;
+        const nx=cdx/cd, ny=cdy/cd;
+        b1.x-=nx*ol/2; b1.y-=ny*ol/2; b2.x+=nx*ol/2; b2.y+=ny*ol/2;
+        const dvn=(b1.vx-b2.vx)*nx+(b1.vy-b2.vy)*ny;
+        if (dvn>0) {
+          const j2=(1+BALL_R)*dvn/2;
+          b1.vx-=j2*nx; b1.vy-=j2*ny; b2.vx+=j2*nx; b2.vy+=j2*ny;
+        }
+      }
+    }
+  }
+
+  // Cushions for all balls
+  for (const id of ids) {
+    if (!simBallState[id].pocketed) cush(simBallState[id]);
+  }
+
+  // Pocketing for all balls
+  for (const id of ids) {
+    const b = simBallState[id];
+    if (b.pocketed) continue;
+    for (let p=0; p<6; p++) {
+      const dx2=b.x-POCKETS[p][0], dy2=b.y-POCKETS[p][1];
+      if (dx2*dx2+dy2*dy2 < POCKET_R[p]**2) {
+        b.pocketed=true; b.vx=0; b.vy=0;
+        simPocketed.add(id);
+        break;
+      }
+    }
+  }
+
+  // Check if all balls stopped
+  let allStopped = true;
+  for (const id of ids) {
+    const b = simBallState[id];
+    if (!b.pocketed && Math.sqrt(b.vx*b.vx+b.vy*b.vy) > VT) { allStopped=false; break; }
+  }
+
+  if (allStopped) {
+    simulating = false;
+    // Update ball positions from simulation
+    cueBall.x = simBallState[0].x; cueBall.y = simBallState[0].y;
+    for (const b of balls) {
+      if (b.id in simBallState && !simBallState[b.id].pocketed) {
+        b.x = simBallState[b.id].x; b.y = simBallState[b.id].y;
+      }
+    }
+    // Process pocketed balls
+    let madeTarget = false;
+    for (const pid of simPocketed) {
+      if (pid === 0) { cueBall.x=25; cueBall.y=25; runLength=0; }
+      else { pocketed.add(pid); shotsMade++;
+        if (pid === currentPlan?.ballId) madeTarget=true; }
+    }
+    if (madeTarget) {
+      runLength++;
+      document.getElementById('status').textContent=
+        `POCKETED! Run: ${runLength}. Click "Plan Next".`;
+    } else {
+      runLength=0;
+      document.getElementById('status').textContent='Missed. Click "Plan Next".';
+    }
+    document.getElementById('stats').textContent=`Shots:${shotsTaken} Made:${shotsMade} Run:${runLength}`;
+    currentPlan=null;
+    simBallState={};
+  }
+}
+function applyF(b){const sp=Math.sqrt(b.vx**2+b.vy**2);if(sp<VT){b.vx=0;b.vy=0;return;}
+  const dv=MU_ROLL*G_*DT_;if(dv>=sp){b.vx=0;b.vy=0;}else{const f=1-dv/sp;b.vx*=f;b.vy*=f;}}
+function cush(b){if(b.x<R&&b.vx<0){b.vx=-b.vx*CUSH_R;b.x=R;}if(b.x>TL-R&&b.vx>0){b.vx=-b.vx*CUSH_R;b.x=TL-R;}
+  if(b.y<R&&b.vy<0){b.vy=-b.vy*CUSH_R;b.y=R;}if(b.y>TW-R&&b.vy>0){b.vy=-b.vy*CUSH_R;b.y=TW-R;}}
+
+function newTable() {
+  simulating=false;simBalls=null;currentPlan=null;pocketed.clear();runLength=0;
+  cueBall.x=R*3+Math.random()*(TL-6*R);cueBall.y=R*3+Math.random()*(TW-6*R);
+  balls=[];const placed=[[cueBall.x,cueBall.y]];
+  for(let i=1;i<=NUM_BALLS;i++){
+    for(let a=0;a<200;a++){const x=R*3+Math.random()*(TL-6*R),y=R*3+Math.random()*(TW-6*R);
+      if(placed.every(p=>Math.sqrt((x-p[0])**2+(y-p[1])**2)>3*R)){balls.push({id:i,x,y});placed.push([x,y]);break;}}
+  }
+  document.getElementById('status').textContent='Click "Plan Next" to see the AI\'s plan.';
+  document.getElementById('stats').textContent='';
+}
+
+function draw() {
+  const c=document.getElementById('table'),ctx=c.getContext('2d');
+  ctx.clearRect(0,0,c.width,c.height);
+  // Table
+  ctx.fillStyle='#3d1f00';ctx.fillRect(0,0,c.width,c.height);
+  ctx.fillStyle='#6b3300';ctx.fillRect(OX*0.3,OY*0.3,c.width-OX*0.6,c.height-OY*0.6);
+  ctx.fillStyle='#0e7a2b';ctx.fillRect(OX,OY,TL*S,TW*S);
+  for(let p=0;p<6;p++){ctx.beginPath();ctx.arc(tx(POCKETS[p][0]),ty(POCKETS[p][1]),POCKET_R[p]*S,0,Math.PI*2);ctx.fillStyle='#111';ctx.fill();}
+
+  const bx=simBalls&&!simBalls.objPocketed?simBalls.obj.x:null;
+  const by=simBalls&&!simBalls.objPocketed?simBalls.obj.y:null;
+  const cx=simBalls?simBalls.cue.x:cueBall.x;
+  const cy=simBalls?simBalls.cue.y:cueBall.y;
+
+  // Draw plan
+  if(currentPlan&&!simulating){
+    const pl=currentPlan;
+    const b=balls.find(b2=>b2.id===pl.ballId);
+    // Ghost ball
+    ctx.beginPath();ctx.arc(tx(pl.ghost.x),ty(pl.ghost.y),R*S,0,Math.PI*2);
+    ctx.strokeStyle='rgba(255,255,255,0.4)';ctx.lineWidth=2;ctx.setLineDash([3,3]);ctx.stroke();ctx.setLineDash([]);
+    // Aim line
+    const dx=Math.cos(pl.aimAngle),dy=Math.sin(pl.aimAngle);
+    ctx.beginPath();ctx.setLineDash([4,6]);ctx.moveTo(tx(cx),ty(cy));ctx.lineTo(tx(cx+dx*100),ty(cy+dy*100));
+    ctx.strokeStyle='rgba(255,255,255,0.3)';ctx.lineWidth=1;ctx.stroke();ctx.setLineDash([]);
+    // Pocket path (extended through ghost)
+    const pp=PA[pl.pocketIdx];
+    const pdx=b.x-pp[0],pdy=b.y-pp[1],pd=Math.sqrt(pdx*pdx+pdy*pdy)||0.001;
+    const pnx=pdx/pd,pny=pdy/pd;
+    ctx.beginPath();ctx.setLineDash([5,4]);ctx.moveTo(tx(pp[0]),ty(pp[1]));
+    ctx.lineTo(tx(b.x+pnx*6*R),ty(b.y+pny*6*R));
+    ctx.strokeStyle='rgba(255,180,0,0.5)';ctx.lineWidth=1.5;ctx.stroke();ctx.setLineDash([]);
+    // Spin indicator
+    ctx.fillStyle=SPIN_COLORS[pl.spinType];ctx.font='bold 12px Arial';ctx.textAlign='center';
+    ctx.fillText(SPIN_NAMES[pl.spinType],tx(cx),ty(cy)+R*S+15);
+    // Target ball ring
+    ctx.beginPath();ctx.arc(tx(b.x),ty(b.y),R*S+5,0,Math.PI*2);
+    ctx.strokeStyle='rgba(255,100,100,0.7)';ctx.lineWidth=2;ctx.stroke();
+    // Pocket ring
+    ctx.beginPath();ctx.arc(tx(POCKETS[pl.pocketIdx][0]),ty(POCKETS[pl.pocketIdx][1]),POCKET_R[pl.pocketIdx]*S*0.6,0,Math.PI*2);
+    ctx.strokeStyle='rgba(255,200,0,0.6)';ctx.lineWidth=2.5;ctx.stroke();
+  }
+
+  // Balls
+  for(const b of balls){
+    if(pocketed.has(b.id)) continue;
+    // During simulation, use simulated positions
+    let bxx=b.x, byy=b.y;
+    if(simulating && simBallState[b.id]) {
+      if(simBallState[b.id].pocketed) continue;
+      bxx=simBallState[b.id].x; byy=simBallState[b.id].y;
+    }
+    ctx.beginPath();ctx.arc(tx(bxx),ty(byy),R*S,0,Math.PI*2);
+    ctx.fillStyle=BALL_COLORS[(b.id-1)%15];ctx.fill();
+    const gr=ctx.createRadialGradient(tx(bxx)-R*S*0.3,ty(byy)-R*S*0.3,R*S*0.1,tx(bxx),ty(byy),R*S);
+    gr.addColorStop(0,'rgba(255,255,255,0.4)');gr.addColorStop(1,'rgba(0,0,0,0.3)');
+    ctx.beginPath();ctx.arc(tx(bxx),ty(byy),R*S,0,Math.PI*2);ctx.fillStyle=gr;ctx.fill();
+    ctx.fillStyle='#fff';ctx.font=`bold ${Math.round(R*S*0.55)}px Arial`;ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText(b.id.toString(),tx(bxx),ty(byy)+0.5);
+  }
+  // Cue ball
+  const cueDraw = simulating && simBallState[0] ? simBallState[0] : cueBall;
+  if(!(simulating && simBallState[0] && simBallState[0].pocketed)){
+    const ccx=cueDraw.x, ccy=cueDraw.y;
+    ctx.beginPath();ctx.arc(tx(ccx),ty(ccy),R*S,0,Math.PI*2);ctx.fillStyle='#fff';ctx.fill();
+    const gr2=ctx.createRadialGradient(tx(ccx)-R*S*0.3,ty(ccy)-R*S*0.3,R*S*0.1,tx(ccx),ty(ccy),R*S);
+    gr2.addColorStop(0,'rgba(255,255,255,0.4)');gr2.addColorStop(1,'rgba(0,0,0,0.2)');
+    ctx.beginPath();ctx.arc(tx(ccx),ty(ccy),R*S,0,Math.PI*2);ctx.fillStyle=gr2;ctx.fill();
+  }
+}
+
+function gameLoop(){if(simulating)for(let i=0;i<10;i++)simStep();draw();requestAnimationFrame(gameLoop);}
+
+document.getElementById('shootBtn').addEventListener('click',shoot);
+document.getElementById('nextBtn').addEventListener('click',planShot);
+document.getElementById('newBtn').addEventListener('click',newTable);
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>

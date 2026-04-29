@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Pool sandbox — one ball</title>
+<style>
+  * { box-sizing: border-box; }
+  body { background:#101418; color:#eee; font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;
+         margin:0; padding:12px; }
+  h1 { margin:0 0 4px; color:#ffd84a; font-size:16px; }
+  p.sub { margin:0 0 10px; color:#999; font-size:11px; }
+  .app { display:flex; gap:16px; align-items:flex-start; }
+  .left { flex:0 0 auto; }
+  .right { flex:1 1 auto; min-width:280px; }
+  canvas { display:block; background:#0e6b3b; border:4px solid #3a2817; border-radius:4px; }
+  .panel { background:#1a1e24; border-radius:6px; padding:12px; font-size:12px; }
+  .panel h2 { margin:0 0 8px; font-size:13px; color:#c8a96e; }
+  .row { display:flex; justify-content:space-between; align-items:center;
+         margin:4px 0; gap:8px; }
+  .row label { min-width:84px; color:#bbb; }
+  .row input[type=range] { flex:1; }
+  .row .val { min-width:48px; text-align:right; color:#fff; font-variant-numeric:tabular-nums; font-size:11px; }
+  .shoot { width:100%; padding:10px; margin-top:10px; background:linear-gradient(#c44,#922);
+           color:#fff; border:none; border-radius:5px; font-weight:bold; font-size:13px;
+           letter-spacing:0.5px; cursor:pointer; }
+  .shoot:hover { filter:brightness(1.1); }
+  .shoot:disabled { opacity:0.4; cursor:not-allowed; }
+  .aim-mode { display:flex; gap:6px; margin:6px 0 10px; }
+  .aim-mode button { flex:1; padding:6px; background:#242a33; color:#ccc; border:1px solid #333;
+                     border-radius:4px; cursor:pointer; font-size:11px; }
+  .aim-mode button.active { background:#3a4758; color:#ffd84a; border-color:#ffd84a; }
+  .status { margin-top:10px; padding:8px; background:#242a33; border-radius:4px;
+            font-size:11px; min-height:40px; line-height:1.5; }
+  .tag { display:inline-block; padding:2px 6px; border-radius:3px; margin-right:4px; font-size:10px; font-weight:bold; }
+  .tag.pocket { background:#2d6a4f; color:#bfffce; }
+  .tag.hit    { background:#5d4e1a; color:#ffe1a0; }
+  .tag.miss   { background:#6a2d2d; color:#ffbbbb; }
+  .note { font-size:10px; color:#888; margin-top:6px; font-style:italic; }
+  select { background:#242a33; color:#fff; border:1px solid #333; padding:4px;
+           border-radius:3px; font-size:11px; }
+</style>
+</head>
+<body>
+<h1>Pool sandbox — one cue ball, one object ball</h1>
+<p class="sub">Adjust sliders, pick Network or Manual aim, hit Shoot. Animation plays the real <code>pool_sim.c</code> trajectory.</p>
+
+<div class="app">
+  <div class="left">
+    <canvas id="table" width="720" height="360"></canvas>
+    <div class="status" id="status">Ready. Click any slider or press Shoot.</div>
+  </div>
+
+  <div class="right panel">
+    <h2>Positions (inches) — drag balls on table</h2>
+    <div class="row"><label>cue</label><span class="val" id="v_cue_pos" style="min-width:120px">(20.0, 25.0)</span></div>
+    <div class="row"><label>object</label><span class="val" id="v_ball_pos" style="min-width:120px">(70.0, 25.0)</span></div>
+
+    <h2 style="margin-top:12px">Action</h2>
+    <div class="row"><label>force</label><input type="range" id="force" min="10" max="300" step="1" value="40"><span class="val" id="v_force">40</span></div>
+    <div class="row"><label>english (x)</label><input type="range" id="ex" min="-1" max="1" step="0.05" value="0"><span class="val" id="v_ex">0.00</span></div>
+    <div class="row"><label>draw/follow (y)</label><input type="range" id="ey" min="-1" max="1" step="0.05" value="0"><span class="val" id="v_ey">0.00</span></div>
+    <div class="note" id="spin_note">→ spin_mode=stop (ey in [-0.33, 0.33])</div>
+    <div style="display:flex; justify-content:center; margin-top:6px">
+      <canvas id="contact_canvas" width="120" height="120"
+              style="background:#0e6b3b; border-radius:6px;"></canvas>
+    </div>
+    <div class="note" style="text-align:center">tip contact point</div>
+
+    <h2 style="margin-top:12px">Aim</h2>
+    <div class="aim-mode">
+      <button id="aim_manual" class="active">manual</button>
+      <button id="aim_network">network</button>
+    </div>
+    <div class="row" id="manual_aim_row"><label>aim (coarse)</label><input type="range" id="manual_aim_deg" min="-180" max="180" step="0.5" value="0"><span class="val" id="v_manual_aim_deg">0.0°</span></div>
+    <div class="row" id="manual_aim_row_fine"><label>aim (fine)</label><input type="range" id="manual_aim_deg_fine" min="-5" max="5" step="0.05" value="0"><span class="val" id="v_manual_aim_deg_fine">0.00°</span></div>
+    <div class="row" id="manual_aim_row_total"><label>aim total</label><span class="val" id="v_manual_aim_total" style="min-width:120px">0.00°</span></div>
+    <div class="row" id="ckpt_row" style="display:none">
+      <label>ckpt</label>
+      <select id="ckpt"></select>
+    </div>
+
+    <div style="display:flex; gap:6px">
+      <button class="shoot" id="shoot" style="flex:3">SHOOT</button>
+      <button class="shoot" id="reset" style="flex:1; background:linear-gradient(#444,#222)">RESET</button>
+    </div>
+    <div class="note">Note: the sim currently discretizes <code>ey</code> to stop/follow/draw. <code>ex</code> (english) is not modeled yet — we'll add continuous spin before Phase 4.</div>
+  </div>
+</div>
+
+<script>
+const TL = 100, TW = 50, R = 1.125;
+const canvas = document.getElementById('table');
+const ctx = canvas.getContext('2d');
+const sx = canvas.width  / TL;
+const sy = canvas.height / TW;
+const POCKETS = [
+  [0,0,2.5], [TL/2,0,2.75], [TL,0,2.5],
+  [0,TW,2.5], [TL/2,TW,2.75], [TL,TW,2.5],
+];
+
+let state = {
+  cue: [20, 25],
+  ball: [70, 25],
+  force: 40, ex: 0, ey: 0,
+  aim_mode: 'manual',
+  manual_aim_deg: 0,
+  manual_aim_deg_fine: 0,
+  ckpt: 'checkpoints/phase3_slowlr_92pct.pt',
+};
+
+function manualAimTotal() {
+  return state.manual_aim_deg + state.manual_aim_deg_fine;
+}
+
+let anim = null;
+let lastShotResult = null;
+
+function drawStatic(aim_deg) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // pockets
+  for (const [px, py, r] of POCKETS) {
+    ctx.beginPath();
+    ctx.arc(px*sx, py*sy, (r*0.8)*Math.max(sx,sy)*0.5, 0, 2*Math.PI);
+    ctx.fillStyle = '#111';
+    ctx.fill();
+  }
+
+  // aim line preview
+  if (aim_deg !== undefined) {
+    const ang = aim_deg * Math.PI/180;
+    const L = 160;
+    const tx = state.cue[0] + Math.cos(ang) * L;
+    const ty = state.cue[1] + Math.sin(ang) * L;
+    ctx.strokeStyle = '#ff4040';
+    ctx.setLineDash([4, 3]);
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(state.cue[0]*sx, state.cue[1]*sy);
+    ctx.lineTo(tx*sx, ty*sy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // cue ball (with contact point overlay)
+  drawCueBall(state.cue[0]*sx, state.cue[1]*sy, R*sx);
+
+  // object ball
+  ctx.beginPath();
+  ctx.arc(state.ball[0]*sx, state.ball[1]*sy, R*sx, 0, 2*Math.PI);
+  ctx.fillStyle = '#44c268';
+  ctx.strokeStyle = '#226030';
+  ctx.fill(); ctx.stroke();
+}
+
+function drawCueBall(cx, cy, rPx) {
+  ctx.beginPath();
+  ctx.arc(cx, cy, rPx, 0, 2*Math.PI);
+  ctx.fillStyle = '#fdfdfd';
+  ctx.strokeStyle = '#222';
+  ctx.lineWidth = 1.5;
+  ctx.fill(); ctx.stroke();
+}
+
+// Separate side-panel canvas shows the cue-tip contact point (ex, ey).
+// x-axis = english (left/right), y-axis = follow/draw (top = follow).
+function drawContactIndicator() {
+  const c = document.getElementById('contact_canvas');
+  if (!c) return;
+  const cx = c.width / 2, cy = c.height / 2;
+  const rPx = Math.min(cx, cy) - 6;
+  const g = c.getContext('2d');
+  g.clearRect(0, 0, c.width, c.height);
+
+  // Ball
+  g.beginPath(); g.arc(cx, cy, rPx, 0, 2*Math.PI);
+  g.fillStyle = '#fdfdfd'; g.strokeStyle = '#222'; g.lineWidth = 1.5;
+  g.fill(); g.stroke();
+
+  // Safe-contact ring (inside which contact stays below the miscue limit,
+  // ~0.7 * R from center for real pool).
+  const innerR = rPx * 0.7;
+  g.beginPath(); g.arc(cx, cy, innerR, 0, 2*Math.PI);
+  g.strokeStyle = 'rgba(120,120,120,0.55)'; g.lineWidth = 1;
+  g.setLineDash([4, 3]); g.stroke(); g.setLineDash([]);
+
+  // Cross-hair
+  g.strokeStyle = 'rgba(120,120,120,0.7)'; g.lineWidth = 1;
+  g.beginPath();
+  g.moveTo(cx - rPx*0.3, cy); g.lineTo(cx + rPx*0.3, cy);
+  g.moveTo(cx, cy - rPx*0.3); g.lineTo(cx, cy + rPx*0.3);
+  g.stroke();
+
+  // Axis labels
+  g.fillStyle = '#888'; g.font = '10px monospace';
+  g.textAlign = 'center';
+  g.fillText('follow',  cx, 12);
+  g.fillText('draw',    cx, c.height - 4);
+  g.textAlign = 'left';
+  g.fillText('L', 4, cy + 3);
+  g.textAlign = 'right';
+  g.fillText('R', c.width - 4, cy + 3);
+
+  // Contact dot
+  const dotX = cx + state.ex * innerR;
+  const dotY = cy - state.ey * innerR;    // screen y down; +ey = follow = top
+  const dotR = Math.max(3, rPx * 0.13);
+  g.beginPath(); g.arc(dotX, dotY, dotR, 0, 2*Math.PI);
+  g.fillStyle = '#ff3030'; g.strokeStyle = '#800'; g.lineWidth = 1;
+  g.fill(); g.stroke();
+}
+
+function drawFrame(positions) {
+  // Validate positions BEFORE clearing canvas. If invalid, leave the
+  // previous frame on screen so the user can see something went wrong
+  // rather than an empty table.
+  const [cue, ball] = positions || [null, null];
+  const ok = cue && ball &&
+    isFinite(cue[0])  && isFinite(cue[1]) &&
+    isFinite(ball[0]) && isFinite(ball[1]);
+  if (!ok) {
+    console.warn('[drawFrame] bad positions, keeping previous canvas', positions);
+    return;
+  }
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  for (const [px, py, r] of POCKETS) {
+    ctx.beginPath();
+    ctx.arc(px*sx, py*sy, (r*0.8)*Math.max(sx,sy)*0.5, 0, 2*Math.PI);
+    ctx.fillStyle = '#111';
+    ctx.fill();
+  }
+  // faint start markers
+  ctx.fillStyle = 'rgba(255,255,255,0.08)';
+  ctx.beginPath(); ctx.arc(state.cue[0]*sx, state.cue[1]*sy, R*sx, 0, 2*Math.PI); ctx.fill();
+  ctx.beginPath(); ctx.arc(state.ball[0]*sx, state.ball[1]*sy, R*sx, 0, 2*Math.PI); ctx.fill();
+  // current positions
+  drawCueBall(cue[0]*sx, cue[1]*sy, R*sx);
+  ctx.beginPath();
+  ctx.arc(ball[0]*sx, ball[1]*sy, R*sx, 0, 2*Math.PI);
+  ctx.fillStyle = '#44c268';
+  ctx.strokeStyle = '#226030';
+  ctx.fill(); ctx.stroke();
+}
+
+function bindSlider(id, key, fmt) {
+  const el = document.getElementById(id);
+  const val = document.getElementById('v_' + id);
+  const update = () => {
+    const v = parseFloat(el.value);
+    if (Array.isArray(state[key])) {
+      // handled separately
+    } else {
+      state[key] = v;
+    }
+    val.textContent = fmt(v);
+    if (id === 'ey') updateSpinNote(v);
+    // Update visual position for sliders that change state[.][.]
+    if (id.startsWith('cue_') || id.startsWith('ball_')) {
+      const axis = id.endsWith('_x') ? 0 : 1;
+      const which = id.startsWith('cue_') ? 'cue' : 'ball';
+      state[which][axis] = v;
+    }
+    updateAimTotalReadout();
+    drawContactIndicator();
+    if (!anim) drawStatic(state.aim_mode === 'manual' ? manualAimTotal() : undefined);
+  };
+  el.addEventListener('input', update);
+  return update;
+}
+
+function updateSpinNote(ey) {
+  const note = document.getElementById('spin_note');
+  let mode = 'stop';
+  if (ey > 0.33) mode = 'follow';
+  else if (ey < -0.33) mode = 'draw';
+  note.textContent = `→ spin_mode=${mode}  (ey in ${ey > 0.33 ? '(0.33, 1]' : ey < -0.33 ? '[-1, -0.33)' : '[-0.33, 0.33]'})`;
+}
+
+function updatePosReadouts() {
+  document.getElementById('v_cue_pos').textContent =
+    `(${state.cue[0].toFixed(1)}, ${state.cue[1].toFixed(1)})`;
+  document.getElementById('v_ball_pos').textContent =
+    `(${state.ball[0].toFixed(1)}, ${state.ball[1].toFixed(1)})`;
+}
+
+// --- Drag balls on the canvas -----------------------------------------
+let drag = null;  // {which: 'cue'|'ball', offset:[dx,dy]}
+
+function canvasPosToTable(evt) {
+  const rect = canvas.getBoundingClientRect();
+  const px = evt.clientX - rect.left;
+  const py = evt.clientY - rect.top;
+  return [px / (rect.width  / TL), py / (rect.height / TW)];
+}
+
+function hitBall(pos, which) {
+  const b = state[which];
+  const dx = pos[0] - b[0], dy = pos[1] - b[1];
+  return Math.hypot(dx, dy) <= R * 1.4;  // slight grab halo
+}
+
+function clampInside(p) {
+  const pad = R * 1.1;
+  return [Math.max(pad, Math.min(TL - pad, p[0])),
+          Math.max(pad, Math.min(TW - pad, p[1]))];
+}
+
+function setCoarseAimFromPoint(p) {
+  const ang = Math.atan2(p[1] - state.cue[1], p[0] - state.cue[0]);
+  let coarse = ang * 180/Math.PI - state.manual_aim_deg_fine;
+  if (coarse > 180)  coarse -= 360;
+  if (coarse < -180) coarse += 360;
+  state.manual_aim_deg = coarse;
+  const el  = document.getElementById('manual_aim_deg');
+  const val = document.getElementById('v_manual_aim_deg');
+  if (el)  el.value = coarse.toFixed(1);
+  if (val) val.textContent = coarse.toFixed(1) + '°';
+  updateAimTotalReadout();
+}
+
+canvas.style.cursor = 'grab';
+canvas.addEventListener('mousemove', (evt) => {
+  if (anim) return;
+  const p = canvasPosToTable(evt);
+  if (drag && (drag.which === 'cue' || drag.which === 'ball')) {
+    const np = clampInside([p[0] - drag.offset[0], p[1] - drag.offset[1]]);
+    const other = drag.which === 'cue' ? state.ball : state.cue;
+    if (Math.hypot(np[0]-other[0], np[1]-other[1]) < 2*R*1.05) return;
+    state[drag.which] = np;
+    updatePosReadouts();
+    drawStatic(state.aim_mode === 'manual' ? manualAimTotal() : undefined);
+  } else if (drag && drag.which === 'aim') {
+    setCoarseAimFromPoint(p);
+    drawStatic(manualAimTotal());
+  } else {
+    if (hitBall(p, 'cue') || hitBall(p, 'ball')) canvas.style.cursor = 'grab';
+    else if (state.aim_mode === 'manual') canvas.style.cursor = 'crosshair';
+    else canvas.style.cursor = 'default';
+  }
+});
+canvas.addEventListener('mousedown', (evt) => {
+  if (anim) return;
+  const p = canvasPosToTable(evt);
+  if (hitBall(p, 'cue')) {
+    drag = {which: 'cue', offset: [p[0] - state.cue[0], p[1] - state.cue[1]]};
+    canvas.style.cursor = 'grabbing';
+  } else if (hitBall(p, 'ball')) {
+    drag = {which: 'ball', offset: [p[0] - state.ball[0], p[1] - state.ball[1]]};
+    canvas.style.cursor = 'grabbing';
+  } else if (state.aim_mode === 'manual') {
+    drag = {which: 'aim'};
+    canvas.style.cursor = 'crosshair';
+    setCoarseAimFromPoint(p);
+    drawStatic(manualAimTotal());
+  }
+});
+window.addEventListener('mouseup', () => {
+  drag = null;
+  canvas.style.cursor = 'grab';
+});
+
+bindSlider('force',  'force', v => v.toFixed(0));
+bindSlider('ex',     'ex',    v => v.toFixed(2));
+bindSlider('ey',     'ey',    v => v.toFixed(2));
+bindSlider('manual_aim_deg',      'manual_aim_deg',      v => v.toFixed(1) + '°');
+bindSlider('manual_aim_deg_fine', 'manual_aim_deg_fine', v => v.toFixed(2) + '°');
+
+function updateAimTotalReadout() {
+  document.getElementById('v_manual_aim_total').textContent =
+    manualAimTotal().toFixed(2) + '°';
+}
+
+function setAimMode(mode) {
+  state.aim_mode = mode;
+  document.getElementById('aim_manual').classList.toggle('active', mode === 'manual');
+  document.getElementById('aim_network').classList.toggle('active', mode === 'network');
+  document.getElementById('manual_aim_row').style.display = mode === 'manual' ? '' : 'none';
+  document.getElementById('ckpt_row').style.display = mode === 'network' ? '' : 'none';
+  drawStatic(mode === 'manual' ? manualAimTotal() : undefined);
+}
+document.getElementById('aim_manual').addEventListener('click', () => setAimMode('manual'));
+document.getElementById('aim_network').addEventListener('click', () => setAimMode('network'));
+
+async function loadCheckpoints() {
+  try {
+    const r = await fetch('/list_checkpoints');
+    const data = await r.json();
+    const sel = document.getElementById('ckpt');
+    for (const name of data.checkpoints) {
+      const opt = document.createElement('option');
+      opt.value = 'checkpoints/' + name;
+      opt.textContent = name;
+      if (opt.value === state.ckpt) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.addEventListener('change', () => { state.ckpt = sel.value; });
+  } catch (e) { /* ignore */ }
+}
+loadCheckpoints();
+
+function animate(frames, onDone) {
+  if (anim) cancelAnimationFrame(anim);
+  console.log('[animate] start', {
+    n_frames: frames ? frames.length : 'null',
+    first: frames && frames[0],
+    last: frames && frames[frames.length - 1],
+    state_cue: state.cue, state_ball: state.ball,
+  });
+  if (!frames || frames.length === 0) {
+    console.warn('[animate] empty trajectory — calling onDone immediately');
+    if (onDone) onDone();
+    return;
+  }
+  const start = performance.now();
+  const fps = 50;
+  const duration = frames.length / fps;
+  let frameCount = 0;
+  const step = (now) => {
+    try {
+      // Clamp t to be non-negative. Some browsers fire the first RAF with
+      // `now` slightly less than our `start` timestamp due to timing
+      // precision differences; that would give a negative idx and abort
+      // the animation before it even starts. (Classic symptom: "works
+      // with devtools open, fails closed" — devtools slow the loop enough
+      // to make now > start reliably.)
+      const t = Math.max(0, (now - start) / 1000);
+      if (t >= duration) {
+        drawFrame(frames[frames.length - 1]);
+        anim = null;
+        console.log('[animate] done; drew', frameCount, 'frames over', t.toFixed(2), 's');
+        if (onDone) onDone();
+        return;
+      }
+      const idx = Math.max(0, Math.min(frames.length - 1, Math.floor(t * fps)));
+      const f = frames[idx];
+      if (!f || !f[0] || !f[1]) {
+        console.error('[animate] bad frame at idx', idx, f);
+        anim = null;
+        if (onDone) onDone();
+        return;
+      }
+      drawFrame(f);
+      frameCount++;
+      anim = requestAnimationFrame(step);
+    } catch (e) {
+      console.error('[animate] step threw', e);
+      anim = null;
+      if (onDone) onDone();
+    }
+  };
+  anim = requestAnimationFrame(step);
+}
+
+let preShot = null;   // { cue, ball } snapshot taken just before the shot
+
+async function shoot() {
+  const btn = document.getElementById('shoot');
+  btn.disabled = true;
+  document.getElementById('status').textContent = 'Simulating…';
+  // Snapshot positions so Reset can restore them after the shot.
+  preShot = {cue: [state.cue[0], state.cue[1]],
+             ball: [state.ball[0], state.ball[1]]};
+  try {
+    const r = await fetch('/shoot', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        cue: state.cue, ball: state.ball,
+        force: state.force, ex: state.ex, ey: state.ey,
+        aim_mode: state.aim_mode,
+        manual_aim_deg: manualAimTotal(),
+        ckpt: state.ckpt,
+      }),
+    });
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    lastShotResult = data;
+    animate(data.trajectory, () => {
+      // Defensive: validate final positions before updating state.
+      const inside = (x, lo, hi) =>
+        typeof x === 'number' && isFinite(x) && x >= lo && x <= hi;
+      const cueOK = inside(data.cue_final[0], 0, TL) && inside(data.cue_final[1], 0, TW);
+      const ballOK = inside(data.ball_final[0], 0, TL) && inside(data.ball_final[1], 0, TW);
+      if (cueOK) {
+        state.cue = [data.cue_final[0], data.cue_final[1]];
+      } else {
+        console.warn('cue_final outside table, keeping pre-shot', data.cue_final);
+        state.cue = [preShot.cue[0], preShot.cue[1]];
+      }
+      if (ballOK) {
+        state.ball = [data.ball_final[0], data.ball_final[1]];
+      } else {
+        console.warn('ball_final outside table, keeping pre-shot', data.ball_final);
+        state.ball = [preShot.ball[0], preShot.ball[1]];
+      }
+      // If pocketed, display position might be on top of the pocket black
+      // circle and hard to see. Nudge it just inside the rail so it's
+      // visible and grabbable — cosmetic only, doesn't re-simulate.
+      if (data.cue_scratched) state.cue = [15, 25];
+      updatePosReadouts();
+
+      const outcome = data.pocketed
+        ? '<span class="tag pocket">POCKET</span>'
+        : data.hit
+          ? '<span class="tag hit">HIT</span>'
+          : '<span class="tag miss">MISS</span>';
+      const aimLine = data.aim_deg.toFixed(2) + '°';
+      const cuf = data.cue_final.map(v => v.toFixed(1)).join(', ');
+      const baf = data.ball_final.map(v => v.toFixed(1)).join(', ');
+      const engNote = state.ex !== 0 && !data.english_applied ? ' · english ignored by sim' : '';
+      const scratchNote = data.cue_scratched ? ' · cue scratched → reset to (15,25)' : '';
+      document.getElementById('status').innerHTML =
+        `${outcome} spin=${data.spin_mode} aim=${aimLine}<br>cue final: (${cuf})  ball final: (${baf})${engNote}${scratchNote}`;
+
+      // Redraw static view with updated ball positions + aim preview.
+      // Use setTimeout(0) to ensure the redraw runs after any pending
+      // layout so the canvas state is consistent.
+      setTimeout(() => {
+        drawStatic(state.aim_mode === 'manual' ? manualAimTotal() : undefined);
+      }, 0);
+    });
+  } catch (e) {
+    document.getElementById('status').textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+document.getElementById('shoot').addEventListener('click', shoot);
+document.getElementById('reset').addEventListener('click', () => {
+  if (anim) { cancelAnimationFrame(anim); anim = null; }
+  if (!preShot) return;
+  state.cue = [preShot.cue[0], preShot.cue[1]];
+  state.ball = [preShot.ball[0], preShot.ball[1]];
+  updatePosReadouts();
+  drawStatic(state.aim_mode === 'manual' ? manualAimTotal() : undefined);
+  document.getElementById('status').textContent = 'Reset to pre-shot positions.';
+});
+
+drawStatic(0);
+updatePosReadouts();
+updateAimTotalReadout();
+drawContactIndicator();
+</script>
+</body>
+</html>

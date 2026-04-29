@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>8-Ball Pool Simulation</title>
+  <link rel="stylesheet" href="css/style.css">
+  <script>
+    window.onerror = function(msg, url, line, col, err) {
+      var el = document.getElementById('errorDisplay');
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'errorDisplay';
+        el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#600;color:#fcc;' +
+          'padding:10px;font:13px monospace;z-index:9999;white-space:pre-wrap;max-height:30vh;overflow:auto;';
+        document.body.appendChild(el);
+      }
+      el.textContent += msg + (url ? ' (' + url.split('/').pop() + ':' + line + ')' : '') + '\n';
+      return false;
+    };
+  </script>
+</head>
+<body>
+  <div id="container">
+    <h1>Pool Simulation</h1>
+    <div id="gameModeBar">
+      <select id="gameModeSelect">
+        <option value="eight-ball" selected>8-Ball</option>
+        <option value="nine-ball">9-Ball</option>
+        <option value="fourteen-one">14.1 Continuous</option>
+      </select>
+    </div>
+    <div id="playerBar">
+      <div id="player1" class="player-info active">
+        <span class="player-name">Player 1</span>
+        <span class="player-group"></span>
+        <span class="player-indicator"></span>
+      </div>
+      <div id="tableStatus">Table Open</div>
+      <div id="player2" class="player-info">
+        <span class="player-name">Player 2</span>
+        <span class="player-group"></span>
+        <span class="player-indicator"></span>
+      </div>
+    </div>
+    <div id="canvasWrapper">
+      <canvas id="poolCanvas"></canvas>
+      <canvas id="spinCanvas" width="120" height="130"></canvas>
+      <div id="gameOverOverlay">
+        <h2 id="gameOverText">Game Over</h2>
+        <button id="restartBtn">Play Again</button>
+      </div>
+    </div>
+    <div id="controls">
+      <button id="shootBtn" disabled>Shoot</button>
+      <button id="nextBtn">Next Shot</button>
+      <button id="viewToggle">Shooter View</button>
+    </div>
+    <div id="info">
+      <div id="status">Select a game mode and click "Next Shot" to begin</div>
+      <div id="shotInfo"></div>
+    </div>
+    <div id="foulDisplay"></div>
+  </div>
+
+  <script src="js/constants.js?v=25"></script>
+  <script src="js/ball.js?v=25"></script>
+  <script src="js/table.js?v=25"></script>
+  <script src="js/physics.js?v=25"></script>
+  <script src="js/renderer.js?v=25"></script>
+  <script src="js/ai.js?v=25"></script>
+  <script src="js/game.js?v=25"></script>
+  <script src="js/main.js?v=25"></script>
+</body>
+</html>

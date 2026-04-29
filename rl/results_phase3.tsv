@@ -1,0 +1,16 @@
+tag	description	stoch_best_pocket	det_pocket_60	det_hr_60	det_pocket_30	median_aim_err_deg	peak_ent	wall_secs	ckpt_file
+or_ref	approach+straight_line reproduce, warm from approach1 best	0.0	0.7137	0.9962	0.7875	0.74	-3.162	2105	phase3or_ref_latest.pt
+or_sig_0_20	approach_sigma=0.20 in (tighter cue-to-ghost)	0.0	0.675	0.9988	0.7775	0.82	-3.162	2104	phase3or_sig_0_20_latest.pt
+or_sig_0_25	approach_sigma=0.25 in	0.0	0.6613	0.995	0.7388	0.91	-3.162	2112	phase3or_sig_0_25_latest.pt
+or_hit_sig_1_5	hit_sigma=1.5 in (tighter obj-traj-to-pocket)	0.0	0.6737	0.9975	0.7362	0.85	-3.162	2106	phase3or_hit_sig_1_5_latest.pt
+or_hit_sig_4	hit_sigma=4.0 in (looser; is current too sharp?)	0.0	0.7525	0.995	0.8325	0.69	-3.162	2128	phase3or_hit_sig_4_latest.pt
+or_floor_3_5	log_std_min=-3.5 (std ~0.030)	0.0	0.7362	0.9988	0.8087	0.67	-4.162	2110	phase3or_floor_3_5_latest.pt
+or_floor_2_5	log_std_min=-2.5 (looser exploration)	0.0	0.7175	1.0	0.8137	0.88	-2.162	2111	phase3or_floor_2_5_latest.pt
+or_slowlr	lr=1e-4	0.0	0.92	1.0	0.945	0.34	-3.162	2101	phase3or_slowlr_latest.pt
+or_bigbatch	4x samples per update (128 steps)	0.0	0.8538	0.9962	0.9038	0.4	-3.162	8385	phase3or_bigbatch_latest.pt
+or_pocket_20	Pocket reward 20 (2x)	0.0	0.4487	0.9525	0.5188	1.55	-3.162	2112	phase3or_pocket_20_latest.pt
+or_longer	3000 iters with baseline settings	0.0	0.7275	0.9988	0.7812	0.72	-3.162	4231	phase3or_longer_latest.pt
+or_fresh	Warm from phase2_best (fresh start on cut geometry)	0.0	0.6863	0.9962	0.8013	0.69	-3.162	2111	phase3or_fresh_latest.pt
+or_combo_gentle	sigma=0.2 + pkt=15 + longer	0.0	0.5687	0.9925	0.6763	1.06	-3.162	3525	phase3or_combo_gentle_latest.pt
+or_combo_batch_pocket	bigbatch + pocket=20	0.0	0.0	0.0	0.0	0.0	0.0	4067	CRASH
+slowlr_bigbatch	slowlr (lr=1e-4) + bigbatch (128 steps), warm from slowlr 92pct, 1500 iters	0.666	0.9313	1.0	0.9663	0.27	-3.162	8675	phase3slowlr_bigbatch_latest.pt

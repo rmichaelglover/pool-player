@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>RL Aim Demo</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; color: #e0e0e0; font-family: Arial, sans-serif;
+       display: flex; flex-direction: column; align-items: center; min-height: 100vh; padding: 20px; }
+h1 { color: #c8a96e; margin-bottom: 10px; }
+p.info { color: #999; font-size: 13px; margin-bottom: 15px; }
+#canvasWrapper { position: relative; }
+canvas { border-radius: 6px; display: block;
+         box-shadow: 0 8px 32px rgba(0,0,0,0.6); }
+#controls { margin-top: 15px; display: flex; gap: 15px; align-items: center; }
+button { padding: 10px 30px; font-size: 16px; font-weight: bold; border: none;
+         border-radius: 6px; cursor: pointer; text-transform: uppercase; }
+#shootBtn { background: linear-gradient(to bottom, #c44, #922); color: #fff; }
+#shootBtn:hover { background: linear-gradient(to bottom, #d55, #a33); }
+#newBtn { background: linear-gradient(to bottom, #4a7, #285); color: #fff; }
+#newBtn:hover { background: linear-gradient(to bottom, #5b8, #396); }
+#status { margin-top: 10px; color: #c8a96e; font-size: 14px; min-height: 20px; }
+#stats { margin-top: 8px; color: #888; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>Neural Network Aim Demo</h1>
+<p class="info">The network learned to aim in 90 seconds of training. It discovers the ghost ball concept on its own.</p>
+<div id="canvasWrapper">
+  <canvas id="table" width="880" height="480"></canvas>
+</div>
+<div id="controls">
+  <button id="shootBtn">Shoot</button>
+  <button id="newBtn">New Layout</button>
+</div>
+<div id="status">Click "Shoot" to see the AI aim</div>
+<div id="stats"></div>
+
+<script>
+// Constants
+const TL = 100, TW = 50, R = 1.125, S = 8, RW = 5;
+const OX = RW * S, OY = RW * S;
+// Raw pocket positions (for physics/pocketing detection)
+const POCKETS = [[0,0],[TL/2,0],[TL,0],[0,TW],[TL/2,TW],[TL,TW]];
+// Pocket AIM POINTS (mouth centers) -- must match training!
+const _mo = 2.5 * 0.45, _smo = 2.75 * 0.15;
+const POCKETS_AIM = [
+  [_mo, _mo], [TL/2, _smo], [TL-_mo, _mo],
+  [_mo, TW-_mo], [TL/2, TW-_smo], [TL-_mo, TW-_mo]
+];
+const POCKET_R = [2.5, 2.75, 2.5, 2.5, 2.75, 2.5];
+// (POCKET_AIM removed -- using POCKETS_AIM above)
+const IDEAL_DIR = [[-1,-1],[0,-1],[1,-1],[-1,1],[0,1],[1,1]];
+const MAX_ANGLE = [65,50,65,65,50,65].map(d => d * Math.PI/180);
+
+// Physics constants for simulation
+const MU_SLIDE = 0.2, MU_ROLL = 0.01, G = 386.09, RESTITUTION = 0.96;
+const CUSHION_REST = 0.92, DT = 1/300, VEL_THRESH = 0.15;
+
+// State
+let cueBall = {x: 25, y: 25};
+let objBall = {x: 70, y: 25};
+let bestPocket = 0;
+let ghostBall = {x: 0, y: 0};
+let aimAngle = 0;
+let model = null;
+let simulating = false;
+let simBalls = null; // {cue: {x,y,vx,vy}, obj: {x,y,vx,vy}}
+let shotsTaken = 0, shotsMade = 0;
+
+// Load model
+fetch('js/aim_model.json').then(r => r.json()).then(m => {
+  model = m;
+  document.getElementById('status').textContent = 'Model loaded. Click "Shoot" to see the AI aim.';
+  newLayout();
+});
+
+function tx(x) { return x * S + OX; }
+function ty(y) { return y * S + OY; }
+
+// Neural network forward pass
+function nnForward(input) {
+  let x = input;
+  for (let i = 0; i < model.layers.length; i += 2) {
+    const W = model.layers[i]; // weight
+    const b = model.layers[i+1]; // bias
+    const rows = W.shape[0], cols = W.shape[1];
+    const out = new Array(rows).fill(0);
+    for (let r = 0; r < rows; r++) {
+      let sum = b.data[r];
+      for (let c = 0; c < cols; c++) sum += W.data[r][c] * x[c];
+      if (i < model.layers.length - 2) {
+        out[r] = Math.max(0, sum); // ReLU
+      } else {
+        out[r] = sum; // raw output (no activation on last layer)
+      }
+    }
+    x = out;
+  }
+  // Handle output type
+  if (model.output === 'cossin') {
+    // Output is (cos, sin) -- normalize and convert to angle
+    const norm = Math.sqrt(x[0]*x[0] + x[1]*x[1]) || 0.001;
+    return Math.atan2(x[1]/norm, x[0]/norm);
+  } else {
+    // Legacy: single angle with tanh*pi
+    return Math.tanh(x[0]) * Math.PI;
+  }
+}
+
+function pickBestPocket() {
+  let bestScore = -1e9, bestP = 0;
+  for (let p = 0; p < 6; p++) {
+    // Use aim points for ghost ball calculation (matches training)
+    const px = POCKETS_AIM[p][0], py = POCKETS_AIM[p][1];
+    let tpx = px - objBall.x, tpy = py - objBall.y;
+    const tpd = Math.sqrt(tpx*tpx + tpy*tpy);
+    if (tpd < 0.1) continue;
+    tpx /= tpd; tpy /= tpd;
+    // Approach angle
+    const id = IDEAL_DIR[p], il = Math.sqrt(id[0]*id[0]+id[1]*id[1]);
+    const dot = (tpx*id[0]/il + tpy*id[1]/il);
+    if (Math.acos(Math.max(-1,Math.min(1,dot))) > MAX_ANGLE[p]) continue;
+    // Ghost
+    const gx = objBall.x - tpx*2*R, gy = objBall.y - tpy*2*R;
+    const cgx = gx-cueBall.x, cgy = gy-cueBall.y;
+    const cgd = Math.sqrt(cgx*cgx+cgy*cgy);
+    if (cgd < 0.1) continue;
+    const cutDot = (cgx/cgd)*tpx + (cgy/cgd)*tpy;
+    const cutAngle = Math.acos(Math.max(-1,Math.min(1,cutDot)));
+    if (cutAngle > 75*Math.PI/180) continue;
+    const score = 50 - tpd*0.3 - cgd*0.2 - cutAngle*(180/Math.PI)*0.5;
+    if (score > bestScore) { bestScore = score; bestP = p; }
+  }
+  bestPocket = bestP;
+  // Compute ghost
+  const px = POCKETS_AIM[bestP][0], py = POCKETS_AIM[bestP][1];
+  let tpx = px - objBall.x, tpy = py - objBall.y;
+  const tpd = Math.sqrt(tpx*tpx+tpy*tpy);
+  ghostBall.x = objBall.x - (tpx/tpd)*2*R;
+  ghostBall.y = objBall.y - (tpy/tpd)*2*R;
+}
+
+function computeAim() {
+  if (!model) return;
+  // Feed the pocket AIM POINT (mouth center), matching training
+  const input = [
+    cueBall.x / TL, cueBall.y / TW,
+    objBall.x / TL, objBall.y / TW,
+    POCKETS_AIM[bestPocket][0] / TL, POCKETS_AIM[bestPocket][1] / TW
+  ];
+  aimAngle = nnForward(input);
+
+  // Debug: compare network angle to the correct angle (cue->ghost direction)
+  const correctAngle = Math.atan2(ghostBall.y - cueBall.y, ghostBall.x - cueBall.x);
+  const errorDeg = ((aimAngle - correctAngle) * 180 / Math.PI + 540) % 360 - 180;
+  console.log(`Aim debug: network=${(aimAngle*180/Math.PI).toFixed(1)}deg, ` +
+    `correct=${(correctAngle*180/Math.PI).toFixed(1)}deg, error=${errorDeg.toFixed(1)}deg | ` +
+    `input=[${input.map(v=>v.toFixed(3)).join(',')}] | pocket=${bestPocket}`);
+}
+
+function newLayout() {
+  simulating = false;
+  simBalls = null;
+  // Random cue ball
+  cueBall.x = R*3 + Math.random()*(TL - R*6);
+  cueBall.y = R*3 + Math.random()*(TW - R*6);
+  // Random object ball (not too close)
+  do {
+    objBall.x = R*3 + Math.random()*(TL - R*6);
+    objBall.y = R*3 + Math.random()*(TW - R*6);
+  } while (Math.sqrt((cueBall.x-objBall.x)**2+(cueBall.y-objBall.y)**2) < 5*R);
+  pickBestPocket();
+  computeAim();
+  document.getElementById('status').textContent = 'Click "Shoot"';
+  draw();
+}
+
+function shoot() {
+  if (simulating) return;
+  computeAim();
+  const force = 60; // moderate force
+  const dx = Math.cos(aimAngle), dy = Math.sin(aimAngle);
+  simBalls = {
+    cue: { x: cueBall.x, y: cueBall.y, vx: force*dx, vy: force*dy },
+    obj: { x: objBall.x, y: objBall.y, vx: 0, vy: 0 },
+    cuePocketed: false, objPocketed: false
+  };
+  simulating = true;
+  shotsTaken++;
+  document.getElementById('status').textContent = 'Simulating...';
+}
+
+function simStep() {
+  if (!simBalls) return;
+  const b = simBalls;
+  // Friction for cue
+  applyFriction(b.cue);
+  applyFriction(b.obj);
+  // Move
+  if (!b.cuePocketed) { b.cue.x += b.cue.vx*DT; b.cue.y += b.cue.vy*DT; }
+  if (!b.objPocketed) { b.obj.x += b.obj.vx*DT; b.obj.y += b.obj.vy*DT; }
+  // Ball-ball collision with back-calculated contact normal
+  if (!b.cuePocketed && !b.objPocketed) {
+    const dx = b.obj.x-b.cue.x, dy = b.obj.y-b.cue.y;
+    const d2 = dx*dx+dy*dy, md = 2*R;
+    if (d2 < md*md && d2 > 0.0001) {
+      const d = Math.sqrt(d2);
+      const overlap = md - d;
+
+      // Back-calculate the true collision point to get accurate normal.
+      // The balls overlapped during this timestep. Reverse their positions
+      // by their velocities to find where they FIRST touched.
+      const dvx = b.cue.vx - b.obj.vx, dvy = b.cue.vy - b.obj.vy;
+      const closingSpeed = (dvx*dx + dvy*dy) / d;
+      const dtBack = closingSpeed > 0.01 ? overlap / closingSpeed : 0;
+      // Positions at true contact moment
+      const cx1 = b.cue.x - b.cue.vx*dtBack, cy1 = b.cue.y - b.cue.vy*dtBack;
+      const cx2 = b.obj.x - b.obj.vx*dtBack, cy2 = b.obj.y - b.obj.vy*dtBack;
+      // True collision normal from contact positions
+      const cdx = cx2-cx1, cdy = cy2-cy1;
+      const cd = Math.sqrt(cdx*cdx+cdy*cdy) || 0.001;
+      const nx = cdx/cd, ny = cdy/cd;
+
+      // Separate
+      b.cue.x -= nx*overlap/2; b.cue.y -= ny*overlap/2;
+      b.obj.x += nx*overlap/2; b.obj.y += ny*overlap/2;
+      // Impulse
+      const dvn = (b.cue.vx-b.obj.vx)*nx+(b.cue.vy-b.obj.vy)*ny;
+      if (dvn > 0) {
+        const j = (1+RESTITUTION)*dvn/2;
+        b.cue.vx -= j*nx; b.cue.vy -= j*ny;
+        b.obj.vx += j*nx; b.obj.vy += j*ny;
+      }
+    }
+  }
+  // Cushions
+  cushion(b.cue); cushion(b.obj);
+  // Pockets
+  if (!b.objPocketed) {
+    for (let p = 0; p < 6; p++) {
+      const dx = b.obj.x-POCKETS[p][0], dy = b.obj.y-POCKETS[p][1];
+      if (dx*dx+dy*dy < POCKET_R[p]*POCKET_R[p]) { b.objPocketed = true; b.obj.vx=0; b.obj.vy=0; break; }
+    }
+  }
+  if (!b.cuePocketed) {
+    for (let p = 0; p < 6; p++) {
+      const dx = b.cue.x-POCKETS[p][0], dy = b.cue.y-POCKETS[p][1];
+      if (dx*dx+dy*dy < POCKET_R[p]*POCKET_R[p]) { b.cuePocketed = true; b.cue.vx=0; b.cue.vy=0; break; }
+    }
+  }
+  // Check stopped
+  const cs = Math.sqrt(b.cue.vx**2+b.cue.vy**2);
+  const os = Math.sqrt(b.obj.vx**2+b.obj.vy**2);
+  if (cs < VEL_THRESH && os < VEL_THRESH) {
+    simulating = false;
+    if (b.objPocketed) {
+      shotsMade++;
+      document.getElementById('status').textContent = 'POCKETED! Click "New Layout" for another.';
+    } else {
+      document.getElementById('status').textContent = 'Missed pocket. Click "New Layout" to try again.';
+    }
+    document.getElementById('stats').textContent =
+      `Shots: ${shotsTaken}  Made: ${shotsMade}  Rate: ${(shotsMade/shotsTaken*100).toFixed(0)}%`;
+  }
+}
+function applyFriction(b) {
+  const sp = Math.sqrt(b.vx**2+b.vy**2);
+  if (sp < VEL_THRESH) { b.vx=0; b.vy=0; return; }
+  const decel = MU_ROLL * G * DT;
+  if (decel >= sp) { b.vx=0; b.vy=0; } else { const f=1-decel/sp; b.vx*=f; b.vy*=f; }
+}
+function cushion(b) {
+  if (b.x < R && b.vx < 0) { b.vx = -b.vx*CUSHION_REST; b.x = R; }
+  if (b.x > TL-R && b.vx > 0) { b.vx = -b.vx*CUSHION_REST; b.x = TL-R; }
+  if (b.y < R && b.vy < 0) { b.vy = -b.vy*CUSHION_REST; b.y = R; }
+  if (b.y > TW-R && b.vy > 0) { b.vy = -b.vy*CUSHION_REST; b.y = TW-R; }
+}
+
+function draw() {
+  const c = document.getElementById('table');
+  const ctx = c.getContext('2d');
+  const w = c.width, h = c.height;
+  ctx.clearRect(0,0,w,h);
+  // Table
+  ctx.fillStyle = '#3d1f00'; ctx.fillRect(0,0,w,h);
+  ctx.fillStyle = '#6b3300'; ctx.fillRect(OX*0.3,OY*0.3,w-OX*0.6,h-OY*0.6);
+  ctx.fillStyle = '#0e7a2b'; ctx.fillRect(OX,OY,TL*S,TW*S);
+  // Pockets
+  for (let p = 0; p < 6; p++) {
+    ctx.beginPath();
+    ctx.arc(tx(POCKETS[p][0]),ty(POCKETS[p][1]),POCKET_R[p]*S,0,Math.PI*2);
+    ctx.fillStyle = '#111'; ctx.fill();
+  }
+
+  const bx = simBalls ? simBalls.obj.x : objBall.x;
+  const by = simBalls ? simBalls.obj.y : objBall.y;
+  const cx = simBalls ? simBalls.cue.x : cueBall.x;
+  const cy = simBalls ? simBalls.cue.y : cueBall.y;
+  const objPocketed = simBalls ? simBalls.objPocketed : false;
+  const cuePocketed = simBalls ? simBalls.cuePocketed : false;
+
+  if (!simulating) {
+    // Ghost ball
+    ctx.beginPath();
+    ctx.arc(tx(ghostBall.x),ty(ghostBall.y),R*S,0,Math.PI*2);
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 2;
+    ctx.setLineDash([3,3]); ctx.stroke(); ctx.setLineDash([]);
+    // Aim line
+    const dx = Math.cos(aimAngle), dy = Math.sin(aimAngle);
+    ctx.beginPath(); ctx.setLineDash([4,6]);
+    ctx.moveTo(tx(cx),ty(cy));
+    ctx.lineTo(tx(cx+dx*100),ty(cy+dy*100));
+    ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.setLineDash([]);
+    // Target pocket path -- extend through ball and ghost ball
+    const pp = POCKETS_AIM[bestPocket];
+    // Direction from pocket to ball (and beyond to ghost)
+    const pdx = bx - pp[0], pdy = by - pp[1];
+    const pdist = Math.sqrt(pdx*pdx + pdy*pdy) || 0.001;
+    const pnx = pdx/pdist, pny = pdy/pdist;
+    // Extend past the ball through the ghost ball and beyond
+    const extLen = 6 * R; // extend a few ball widths past the ghost
+    const extX = bx + pnx * extLen, extY = by + pny * extLen;
+    ctx.beginPath(); ctx.setLineDash([5,4]);
+    ctx.moveTo(tx(pp[0]),ty(pp[1]));
+    ctx.lineTo(tx(extX),ty(extY));
+    ctx.strokeStyle = 'rgba(255,180,0,0.5)'; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.setLineDash([]);
+    // Pocket indicator
+    ctx.beginPath();
+    ctx.arc(tx(POCKETS[bestPocket][0]),ty(POCKETS[bestPocket][1]),POCKET_R[bestPocket]*S*0.6,0,Math.PI*2);
+    ctx.strokeStyle = 'rgba(255,200,0,0.6)'; ctx.lineWidth = 2.5; ctx.stroke();
+  }
+  // Object ball
+  if (!objPocketed) {
+    ctx.beginPath();
+    ctx.arc(tx(bx),ty(by),R*S,0,Math.PI*2);
+    ctx.fillStyle = '#FFD700'; ctx.fill();
+    const gr = ctx.createRadialGradient(tx(bx)-R*S*0.3,ty(by)-R*S*0.3,R*S*0.1,tx(bx),ty(by),R*S);
+    gr.addColorStop(0,'rgba(255,255,255,0.4)'); gr.addColorStop(1,'rgba(0,0,0,0.3)');
+    ctx.beginPath(); ctx.arc(tx(bx),ty(by),R*S,0,Math.PI*2);
+    ctx.fillStyle = gr; ctx.fill();
+    ctx.fillStyle='#fff'; ctx.font=`bold ${Math.round(R*S*0.55)}px Arial`;
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('1',tx(bx),ty(by)+0.5);
+  }
+  // Cue ball
+  if (!cuePocketed) {
+    ctx.beginPath();
+    ctx.arc(tx(cx),ty(cy),R*S,0,Math.PI*2);
+    ctx.fillStyle = '#FFFFFF'; ctx.fill();
+    const gr2 = ctx.createRadialGradient(tx(cx)-R*S*0.3,ty(cy)-R*S*0.3,R*S*0.1,tx(cx),ty(cy),R*S);
+    gr2.addColorStop(0,'rgba(255,255,255,0.4)'); gr2.addColorStop(1,'rgba(0,0,0,0.2)');
+    ctx.beginPath(); ctx.arc(tx(cx),ty(cy),R*S,0,Math.PI*2);
+    ctx.fillStyle = gr2; ctx.fill();
+  }
+}
+
+function gameLoop() {
+  if (simulating) {
+    for (let i = 0; i < 10; i++) simStep(); // 10 physics steps per frame
+  }
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+document.getElementById('shootBtn').addEventListener('click', shoot);
+document.getElementById('newBtn').addEventListener('click', newLayout);
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>

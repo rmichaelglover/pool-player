@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Pool AI — 14.1 demo (Phase 6b)</title>
+<style>
+body { background: #1a1d24; color: #e6e9ef; font-family: system-ui, sans-serif; margin: 16px; }
+h1 { color: #f3c77a; font-size: 20px; margin-bottom: 4px; }
+.sub { color: #9aa0aa; font-size: 12px; margin-bottom: 16px; }
+.layout { display: flex; gap: 20px; align-items: flex-start; }
+.left { flex: 0 0 auto; }
+.right { flex: 1; max-width: 500px; }
+canvas { background: #0e1014; border: 1px solid #2a2e38; border-radius: 4px; }
+.controls { background: #222632; padding: 14px; border-radius: 4px; margin-bottom: 14px; }
+button { background: #bb4a4a; color: white; border: 0; padding: 8px 20px; font-size: 14px;
+         border-radius: 4px; cursor: pointer; margin-right: 8px; }
+button:disabled { background: #444; cursor: not-allowed; }
+button.secondary { background: #555; }
+.stat { display: flex; justify-content: space-between; padding: 3px 0;
+        border-bottom: 1px solid #2a2e38; font-size: 13px; }
+.stat:last-child { border-bottom: 0; }
+.stat .k { color: #9aa0aa; }
+.stat .v { color: #e6e9ef; font-variant-numeric: tabular-nums; }
+.msg { font-size: 13px; color: #9aa0aa; margin-top: 8px; }
+.label { font-size: 11px; color: #9aa0aa; text-transform: uppercase; letter-spacing: 0.5px;
+         margin-top: 14px; margin-bottom: 6px; }
+</style>
+</head>
+<body>
+<h1>Pool AI — 14.1 Continuous demo</h1>
+<div class="sub">438K-param transformer + depth-2 shot search (K=24,16) running full 14.1 with rerack</div>
+
+<div class="layout">
+  <div class="left">
+    <canvas id="table" width="800" height="400"></canvas>
+    <div class="msg" id="msg">Click Start to begin a 14.1 run-out attempt.</div>
+  </div>
+  <div class="right">
+    <div class="controls">
+      <button id="startBtn">Start</button>
+      <button id="pauseBtn" class="secondary" disabled>Pause</button>
+      <button id="resetBtn" class="secondary" disabled>Reset</button>
+    </div>
+    <div class="label">Game state</div>
+    <div class="stat"><span class="k">Shot #</span><span class="v" id="shotIdx">0</span></div>
+    <div class="stat"><span class="k">Balls pocketed (total)</span><span class="v" id="totalPocketed">0</span></div>
+    <div class="stat"><span class="k">Current rack #</span><span class="v" id="rackIdx">1</span></div>
+    <div class="stat"><span class="k">Reracks so far</span><span class="v" id="rerackCount">0</span></div>
+    <div class="stat"><span class="k">Balls on table</span><span class="v" id="ballsOnTable">0</span></div>
+    <div class="label">Last shot</div>
+    <div class="stat"><span class="k">Aim</span><span class="v" id="lastAim">—</span></div>
+    <div class="stat"><span class="k">Force</span><span class="v" id="lastForce">—</span></div>
+    <div class="stat"><span class="k">Spin</span><span class="v" id="lastSpin">—</span></div>
+    <div class="stat"><span class="k">Called ball</span><span class="v" id="calledBall">—</span></div>
+    <div class="stat"><span class="k">Called pocket</span><span class="v" id="calledPocket">—</span></div>
+    <div class="stat"><span class="k">Called shot valid</span><span class="v" id="calledValid">—</span></div>
+    <div class="stat"><span class="k">Pocketed this shot</span><span class="v" id="lastPocketed">—</span></div>
+    <div class="stat"><span class="k">Search time</span><span class="v" id="searchMs">—</span></div>
+
+    <div class="label">Shot controls</div>
+    <div style="display:flex; gap:16px; align-items:center; padding:8px 0;">
+      <div>
+        <div style="font-size:10px; color:#9aa0aa; text-align:center; margin-bottom:4px;">Tip contact</div>
+        <canvas id="tipCanvas" width="80" height="80" style="background:#1a1d24; border-radius:4px;"></canvas>
+        <div style="font-size:10px; color:#9aa0aa; text-align:center; margin-top:2px;">top=follow · bottom=draw</div>
+      </div>
+      <div style="flex:1;">
+        <div style="font-size:10px; color:#9aa0aa; margin-bottom:4px;">Force: <span id="forceLabel">—</span></div>
+        <div style="background:#1a1d24; border-radius:3px; height:18px; position:relative; overflow:hidden;">
+          <div id="forceFill" style="background:linear-gradient(90deg,#4ade80,#fbbf24,#ef4444); height:100%; width:0%; transition:width 0.3s;"></div>
+        </div>
+        <div style="display:flex; justify-content:space-between; font-size:9px; color:#9aa0aa; margin-top:2px;">
+          <span>50</span><span>150</span><span>250</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Table dimensions (inches, populated from /geometry) ──────────────────
+let TABLE_L = 100, TABLE_W = 50, BALL_R = 1.125;
+const canvas = document.getElementById('table');
+const ctx = canvas.getContext('2d');
+let scaleX, scaleY, offX, offY;
+
+// Geometry from server: pockets (aim points), cushions, facings,
+// pocket_polygons (visual cutouts). Filled in by fetchGeometry().
+let GEOM = null;
+let POCKETS = [
+    [0, 0], [50, 0], [100, 0],
+    [0, 50], [50, 50], [100, 50]
+];
+
+// Slate-only rendering: the visual envelope is the slate (playing surface
+// + slate overhang). All geometry comes from /geometry — these are only
+// fallback values until the fetch returns.
+let SLATE_OVERHANG = 3.5;
+let CUSH_DEPTH     = 2.0;
+
+function recomputeScale() {
+    const cw = canvas.width, ch = canvas.height;
+    const marginX = 20, marginY = 20;
+    const fullW = TABLE_L + 2 * SLATE_OVERHANG;
+    const fullH = TABLE_W + 2 * SLATE_OVERHANG;
+    const sx = (cw - 2*marginX) / fullW;
+    const sy = (ch - 2*marginY) / fullH;
+    const s = Math.min(sx, sy);
+    scaleX = scaleY = s;
+    offX = (cw - fullW*s) / 2 + SLATE_OVERHANG * s;
+    offY = (ch - fullH*s) / 2 + SLATE_OVERHANG * s;
+}
+
+function tx(x) { return offX + x * scaleX; }
+function ty(y) { return offY + y * scaleY; }
+
+async function fetchGeometry() {
+    try {
+        const r = await fetch('/geometry');
+        if (!r.ok) return;
+        GEOM = await r.json();
+        TABLE_L = GEOM.table_length;
+        TABLE_W = GEOM.table_width;
+        BALL_R = GEOM.ball_r;
+        SLATE_OVERHANG = GEOM.slate_overhang;
+        CUSH_DEPTH = GEOM.cush_depth;
+        POCKETS = GEOM.pockets;
+        recomputeScale();
+    } catch (e) {
+        console.warn('geometry fetch failed', e);
+    }
+}
+
+function drawTable() {
+    const COL_BG     = '#0e1014';
+    const COL_SLATE  = '#3a3a45';
+    const COL_CUSH   = '#0a628c';
+    const COL_POCKET = '#000';
+
+    ctx.fillStyle = COL_BG;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Slate (gray rectangle, sized by the slate overhang).
+    const slateW = TABLE_L + 2 * SLATE_OVERHANG;
+    const slateH = TABLE_W + 2 * SLATE_OVERHANG;
+    ctx.fillStyle = COL_SLATE;
+    ctx.fillRect(tx(-SLATE_OVERHANG), ty(-SLATE_OVERHANG),
+                  slateW * scaleX, slateH * scaleY);
+
+    // Drop pocket holes (slate cutouts) — circles from /geometry. Drawn
+    // black; the cushion fabric drawn next punches the cushion gap on top.
+    if (GEOM && GEOM.pocket_circles) {
+        ctx.fillStyle = COL_POCKET;
+        for (const [cx, cy, r] of GEOM.pocket_circles) {
+            ctx.beginPath();
+            ctx.arc(tx(cx), ty(cy), r * scaleX, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    // Cushion fabric (medium blue), drawn as a band with corner + side
+    // pocket cutouts. Even-odd fill: outer rect minus the playing area
+    // minus the six cushion-gap polygons.
+    if (GEOM && GEOM.cushion_gap_polygons) {
+        ctx.fillStyle = COL_CUSH;
+        ctx.beginPath();
+        ctx.rect(tx(-CUSH_DEPTH), ty(-CUSH_DEPTH),
+                  (TABLE_L + 2 * CUSH_DEPTH) * scaleX,
+                  (TABLE_W + 2 * CUSH_DEPTH) * scaleY);
+        ctx.rect(tx(0), ty(0), TABLE_L * scaleX, TABLE_W * scaleY);
+        for (const poly of GEOM.cushion_gap_polygons) {
+            for (let i = 0; i < poly.length; i++) {
+                const [x, y] = poly[i];
+                if (i === 0) ctx.moveTo(tx(x), ty(y));
+                else         ctx.lineTo(tx(x), ty(y));
+            }
+            ctx.closePath();
+        }
+        ctx.fill('evenodd');
+    }
+
+    // Foot spot — subtle marker at (75, 25), the standard rack position.
+    ctx.strokeStyle = '#7fb8dc';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(tx(75), ty(25), 2, 0, Math.PI * 2);
+    ctx.stroke();
+}
+
+// Pocket capture predicate (matches table_geometry.pocket_captures and
+// pool_sim.c). Returns true if a ball at (x, y) has dropped into a pocket
+// — used to prune balls from animation frames once they're captured.
+function ballPocketed(x, y) {
+    if (!GEOM || !GEOM.pocket_circles) {
+        // Fallback before /geometry has loaded: simple throat-line check.
+        const off = 3.18, sh = 2.5;
+        if (x + y < off) return true;
+        if ((TABLE_L - x) + y < off) return true;
+        if (x + (TABLE_W - y) < off) return true;
+        if ((TABLE_L - x) + (TABLE_W - y) < off) return true;
+        if (y < 0 && x > TABLE_L/2 - sh && x < TABLE_L/2 + sh) return true;
+        if (y > TABLE_W && x > TABLE_L/2 - sh && x < TABLE_L/2 + sh) return true;
+        return false;
+    }
+    const off = GEOM.corner_rail_offset;
+    const sh = GEOM.side_half;
+    const names = GEOM.pocket_names;
+    for (let i = 0; i < GEOM.pocket_circles.length; i++) {
+        const [cx, cy, r] = GEOM.pocket_circles[i];
+        const dx = x - cx, dy = y - cy;
+        if (dx*dx + dy*dy >= r*r) continue;
+        const name = names[i];
+        if (name === 'TL'     && x + y < off) return true;
+        if (name === 'TR'     && (TABLE_L - x) + y < off) return true;
+        if (name === 'BL'     && x + (TABLE_W - y) < off) return true;
+        if (name === 'BR'     && (TABLE_L - x) + (TABLE_W - y) < off) return true;
+        if (name === 'T-side' && y < 0      && x > TABLE_L/2 - sh && x < TABLE_L/2 + sh) return true;
+        if (name === 'B-side' && y > TABLE_W && x > TABLE_L/2 - sh && x < TABLE_L/2 + sh) return true;
+    }
+    return false;
+}
+
+function drawBall(x, y, isCue, id) {
+    const r = BALL_R * scaleX;
+    ctx.beginPath();
+    ctx.arc(tx(x), ty(y), r, 0, Math.PI*2);
+    ctx.fillStyle = isCue ? '#f5f5f0' : '#e8c666';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    if (!isCue && id) {
+        ctx.fillStyle = '#000';
+        ctx.font = `${Math.round(r*1.2)}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(id), tx(x), ty(y));
+    }
+}
+
+// ── State ──────────────────────────────────────────────────────────────────
+let currentState = null;  // {cue, balls}
+let sessionId = Math.random().toString(36).slice(2);
+let running = false;
+let paused = false;
+let animTimer = null;
+
+function render(cue, balls) {
+    drawTable();
+    for (const b of balls) drawBall(b.x, b.y, false, b.id);
+    drawBall(cue[0], cue[1], true, null);
+}
+
+function highlightCall(calledId, calledPocketIdx, aimDeg, state) {
+    // Draw intent overlay on top of current rendered state:
+    //   1. Aim line from cue in shot direction, dashed cyan
+    //   2. Called-ball highlight circle, gold
+    //   3. Ball trajectory line from called ball toward called pocket, dashed gold
+    //   4. Called-pocket ring, gold
+    if (!state) return;
+
+    const BR_CANVAS = BALL_R * scaleX;
+
+    // 1. Aim line from cue, out to the GHOST position (where cue center stops
+    // at contact). This is more honest than drawing to the ball surface —
+    // shows exactly where the cue will end up at the moment of contact.
+    if (aimDeg !== undefined && aimDeg !== null) {
+        const aimRad = aimDeg * Math.PI / 180;
+        const cueX = state.cue[0], cueY = state.cue[1];
+        let endX, endY;
+        if (calledId != null) {
+            const b = state.balls.find(o => o.id === calledId);
+            if (b && calledPocketIdx >= 0) {
+                // Ghost = ball - 2R * (pocket - ball) / |pocket - ball|
+                const [px, py] = POCKETS[calledPocketIdx];
+                const bpx = px - b.x, bpy = py - b.y;
+                const bpm = Math.hypot(bpx, bpy);
+                if (bpm > 1e-6) {
+                    endX = b.x - 2 * BALL_R * bpx / bpm;
+                    endY = b.y - 2 * BALL_R * bpy / bpm;
+                } else {
+                    endX = b.x; endY = b.y;
+                }
+            } else if (b) {
+                // No pocket info — end at ball surface closest to aim line
+                const dx = b.x - cueX, dy = b.y - cueY;
+                const t = dx * Math.cos(aimRad) + dy * Math.sin(aimRad);
+                endX = cueX + t * Math.cos(aimRad);
+                endY = cueY + t * Math.sin(aimRad);
+            } else {
+                endX = cueX + 150 * Math.cos(aimRad);
+                endY = cueY + 150 * Math.sin(aimRad);
+            }
+        } else {
+            endX = cueX + 150 * Math.cos(aimRad);
+            endY = cueY + 150 * Math.sin(aimRad);
+        }
+        ctx.beginPath();
+        ctx.setLineDash([5, 4]);
+        ctx.moveTo(tx(cueX), ty(cueY));
+        ctx.lineTo(tx(endX), ty(endY));
+        ctx.strokeStyle = '#7dd3fc';  // cue-path cyan
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Draw a dashed outline circle at the ghost position — where the cue
+        // center actually stops. Makes it visually clear what "aim" means.
+        ctx.beginPath();
+        ctx.arc(tx(endX), ty(endY), BALL_R * scaleX, 0, Math.PI*2);
+        ctx.strokeStyle = 'rgba(125, 211, 252, 0.7)';
+        ctx.setLineDash([3, 3]);
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.setLineDash([]);
+    }
+
+    // 2. Called-ball highlight circle
+    if (calledId != null) {
+        const b = state.balls.find(o => o.id === calledId);
+        if (b) {
+            ctx.beginPath();
+            ctx.arc(tx(b.x), ty(b.y), BR_CANVAS + 4, 0, Math.PI*2);
+            ctx.strokeStyle = '#f3c77a';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // 3. Ball trajectory line from called ball to called pocket
+            if (calledPocketIdx >= 0) {
+                const [px, py] = POCKETS[calledPocketIdx];
+                ctx.beginPath();
+                ctx.setLineDash([6, 4]);
+                ctx.moveTo(tx(b.x), ty(b.y));
+                ctx.lineTo(tx(px), ty(py));
+                ctx.strokeStyle = '#f3c77a';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+        }
+    }
+
+    // 4. Called-pocket ring
+    if (calledPocketIdx >= 0) {
+        const [px, py] = POCKETS[calledPocketIdx];
+        const r = (px === TABLE_L/2) ? 2.75*scaleX : 2.5*scaleX;
+        ctx.beginPath();
+        ctx.arc(tx(px), ty(py), r + 6, 0, Math.PI*2);
+        ctx.strokeStyle = '#f3c77a';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+    }
+}
+
+function animateTrajectory(traj, idsOrder, pocketedIds, onDone) {
+    // traj: frames x (nballs*2)  (flat pairs per ball in idsOrder)
+    // idsOrder: array of ball IDs (idsOrder[0]=0=cue)
+    // pocketedIds: list of ball IDs pocketed during the shot (may contain 0 for scratch)
+    const frames = traj.length;
+    if (frames === 0) { onDone(); return; }
+    const FRAME_MS = 1000 / 60;  // animate at 60fps (sim is 50 fps recorded; good enough)
+    // Balls are at indices in idsOrder. If a ball is pocketed, in later frames its
+    // position stays at the final (pocketed) point. We treat pockets-detection as:
+    // during render, if distance to any pocket < POCKET_R, stop drawing that ball.
+    let frameIdx = 0;
+
+    function drawFrame() {
+        if (paused) { setTimeout(drawFrame, FRAME_MS); return; }
+        drawTable();
+        const fr = traj[frameIdx];   // fr is an array of [x,y] pairs, one per ball
+        for (let i = 1; i < idsOrder.length; i++) {
+            const bid = idsOrder[i];
+            const x = fr[i][0], y = fr[i][1];
+            if (!ballPocketed(x, y)) drawBall(x, y, false, bid);
+        }
+        // Cue ball at index 0
+        const cx = fr[0][0], cy = fr[0][1];
+        if (!ballPocketed(cx, cy)) drawBall(cx, cy, true, null);
+
+        frameIdx++;
+        if (frameIdx < frames) {
+            animTimer = setTimeout(drawFrame, FRAME_MS);
+        } else {
+            onDone();
+        }
+    }
+    drawFrame();
+}
+
+async function setupGame() {
+    // Creates a new session on the server, fetches the initial table state,
+    // and renders it — but does NOT start play. User clicks Start to begin.
+    sessionId = Math.random().toString(36).slice(2);
+    const r = await fetch('/start', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({session_id: sessionId, max_shots: 100}),
+    });
+    const data = await r.json();
+    TABLE_L = data.table_length; TABLE_W = data.table_width; BALL_R = data.ball_radius;
+    recomputeScale();
+    currentState = {cue: data.cue, balls: data.balls};
+    render(currentState.cue, currentState.balls);
+    updateStats({
+        shotIdx: 0, totalPocketed: 0, rackIdx: 1, rerackCount: 0,
+        ballsOnTable: data.balls.length,
+    });
+    document.getElementById('msg').textContent = 'Ready — click Start to begin.';
+    document.getElementById('startBtn').disabled = false;
+    document.getElementById('pauseBtn').disabled = true;
+    document.getElementById('resetBtn').disabled = false;
+}
+
+async function startGame() {
+    // Start play from the current setup. If no setup is ready (first call
+    // after a reset that hasn't completed, or page load), create one first.
+    if (!currentState) {
+        await setupGame();
+    }
+    document.getElementById('startBtn').disabled = true;
+    document.getElementById('pauseBtn').disabled = false;
+    document.getElementById('resetBtn').disabled = false;
+    running = true;
+    paused = false;
+    document.getElementById('msg').textContent = 'Running...';
+    // Fire first shot after a brief pause
+    setTimeout(nextShot, 1200);
+}
+
+async function nextShot() {
+    if (!running || paused) return;
+    const r = await fetch('/next_shot', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({session_id: sessionId, K1: 24, K2: 16}),
+    });
+    const data = await r.json();
+    if (data.error) {
+        document.getElementById('msg').textContent = 'Error: ' + data.error;
+        running = false; return;
+    }
+    // Update last-shot info
+    document.getElementById('lastAim').textContent = data.aim_deg.toFixed(1) + '°';
+    document.getElementById('lastForce').textContent = data.force.toFixed(1);
+    document.getElementById('lastSpin').textContent = data.spin_factor.toFixed(2);
+    document.getElementById('lastPocketed').textContent = data.pocketed_ids.length > 0
+        ? data.pocketed_ids.join(', ') : '—';
+    document.getElementById('searchMs').textContent = data.search_ms.toFixed(0) + ' ms';
+    const POCKET_NAMES = ['TL', 'T-side', 'TR', 'BL', 'B-side', 'BR'];
+    document.getElementById('calledBall').textContent =
+        data.called_id !== null ? 'ball ' + data.called_id : '(miss)';
+    document.getElementById('calledPocket').textContent =
+        data.called_pocket >= 0 ? POCKET_NAMES[data.called_pocket] : '(none)';
+    const validEl = document.getElementById('calledValid');
+    validEl.textContent = data.called_shot_valid ? '✓ yes' : '✗ no';
+    validEl.style.color = data.called_shot_valid ? '#7ec488' : '#c47e7e';
+    drawTipContact(data.spin_factor);
+    drawForceBar(data.force);
+
+    // Briefly highlight the called ball, aim line, and called pocket on the
+    // pre-shot state before the trajectory starts — so viewer can see what AI
+    // intended. Give it ~1 second of display before starting the animation.
+    render(currentState.cue, currentState.balls);
+    highlightCall(data.called_id, data.called_pocket, data.aim_deg, currentState);
+
+    setTimeout(() => {
+        animateTrajectory(data.trajectory, data.ball_ids_order, data.pocketed_ids, () => {
+        // Snap to post-shot state (handles rerack)
+        currentState = {cue: data.cue_after, balls: data.balls_after};
+        render(currentState.cue, currentState.balls);
+        updateStats({
+            shotIdx: data.shot_idx,
+            totalPocketed: data.total_pocketed,
+            rackIdx: data.rerack_count + 1,
+            rerackCount: data.rerack_count,
+            ballsOnTable: data.balls_after.length,
+        });
+        if (data.rerack_happened) {
+            document.getElementById('msg').textContent = 'Rerack! Starting rack ' + (data.rerack_count + 1) + '.';
+        }
+        if (data.done) {
+            running = false;
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('pauseBtn').disabled = true;
+            const reason = data.scratch ? 'scratched' :
+                           (data.pocketed_ids.length === 0 ? 'missed' : 'reached max shots');
+            document.getElementById('msg').textContent =
+                `Done — ${data.total_pocketed} balls pocketed across ${data.rerack_count + 1} rack(s). (${reason})`;
+        } else {
+            // Schedule next shot (pacing ~5 sec between shots; trajectory animation takes ~1-3s)
+            setTimeout(nextShot, 2000);
+        }
+        });
+    }, 1000);   // 1 second of aim-display before animation starts
+}
+
+function updateStats(s) {
+    for (const k in s) {
+        const el = document.getElementById(k);
+        if (el) el.textContent = s[k];
+    }
+}
+
+const tipCanvas = document.getElementById('tipCanvas');
+const tipCtx = tipCanvas.getContext('2d');
+
+function drawTipContact(spinFactor) {
+    const cw = tipCanvas.width, ch = tipCanvas.height;
+    const cx = cw / 2, cy = ch / 2;
+    const rBall = Math.min(cw, ch) / 2 - 6;
+    tipCtx.clearRect(0, 0, cw, ch);
+    // Cue ball (face view)
+    tipCtx.beginPath();
+    tipCtx.arc(cx, cy, rBall, 0, Math.PI * 2);
+    tipCtx.fillStyle = '#f5f5f0';
+    tipCtx.fill();
+    tipCtx.strokeStyle = '#555';
+    tipCtx.lineWidth = 1;
+    tipCtx.stroke();
+    // Center crosshair (faint)
+    tipCtx.beginPath();
+    tipCtx.moveTo(cx - rBall*0.7, cy); tipCtx.lineTo(cx + rBall*0.7, cy);
+    tipCtx.moveTo(cx, cy - rBall*0.7); tipCtx.lineTo(cx, cy + rBall*0.7);
+    tipCtx.strokeStyle = 'rgba(100,100,100,0.4)';
+    tipCtx.lineWidth = 0.5;
+    tipCtx.stroke();
+    // Tip contact dot: spin_factor in [-2, +2] → offset up/down
+    // Positive spin (follow) = top of ball; negative (draw) = bottom.
+    // Canvas Y increases down, so invert.
+    if (spinFactor !== undefined && spinFactor !== null) {
+        const sf = Math.max(-2, Math.min(2, spinFactor));
+        const dotY = cy - (sf / 2) * rBall * 0.85;  // 0.85 stays inside ball edge
+        tipCtx.beginPath();
+        tipCtx.arc(cx, dotY, 4, 0, Math.PI * 2);
+        tipCtx.fillStyle = '#ef4444';
+        tipCtx.fill();
+        tipCtx.strokeStyle = '#111';
+        tipCtx.lineWidth = 1;
+        tipCtx.stroke();
+    }
+}
+
+function drawForceBar(force) {
+    const el = document.getElementById('forceFill');
+    const label = document.getElementById('forceLabel');
+    if (force === undefined || force === null) {
+        el.style.width = '0%';
+        label.textContent = '—';
+        return;
+    }
+    const pct = Math.max(0, Math.min(100, (force - 50) / 200 * 100));
+    el.style.width = pct + '%';
+    label.textContent = force.toFixed(0);
+}
+
+// Initialize with center tip contact and no force
+drawTipContact(0);
+drawForceBar(null);
+
+document.getElementById('startBtn').onclick = startGame;
+document.getElementById('pauseBtn').onclick = () => {
+    paused = !paused;
+    document.getElementById('pauseBtn').textContent = paused ? 'Resume' : 'Pause';
+    if (!paused && running) {
+        // If paused mid-trajectory, drawFrame polls for paused flag. If paused
+        // between shots, we need to kick off next shot.
+        if (!animTimer) setTimeout(nextShot, 100);
+    }
+};
+document.getElementById('resetBtn').onclick = async () => {
+    running = false; paused = false;
+    if (animTimer) { clearTimeout(animTimer); animTimer = null; }
+    document.getElementById('pauseBtn').disabled = true;
+    document.getElementById('pauseBtn').textContent = 'Pause';
+    document.getElementById('msg').textContent = 'Loading new setup…';
+    await setupGame();   // fetch fresh session and render — don't start play
+};
+
+// On page load: fetch table geometry from server, then set up an initial
+// game (balls on table, ready for break shot).
+recomputeScale();
+drawTable();
+(async () => {
+    await fetchGeometry();
+    drawTable();
+    setupGame();
+})();
+</script>
+</body>
+</html>
