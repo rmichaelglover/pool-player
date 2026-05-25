@@ -6,7 +6,7 @@ check. The network's job is only to *choose among* legal shots (ball/pocket
 pair), and to pick force/spin for position play on the next shot.
 
 Public API:
-    generate_legal_shots(cue_pos, balls, max_cut_deg=75.0) -> list[LegalShot]
+    generate_legal_shots(cue_pos, balls, max_cut_deg=80.0) -> list[LegalShot]
 
 Each LegalShot is a dataclass with fields useful for scoring and execution.
 """
@@ -83,13 +83,13 @@ def cut_angle_deg(cue_pos, ghost_pos, ball_pos, pocket_pos):
 
 
 def _segment_blocked(p1, p2, obstacles, exclude_ids: Iterable[int] = (),
-                     clearance=2 * R + 0.3):
+                     clearance=2 * R + 0.4):
     """True if the straight segment from p1 to p2 passes within `clearance`
     of the center of any obstacle ball (excluding balls in exclude_ids).
 
     The pure ball-ball collision threshold is 2R (sum of radii). We add a
-    small safety margin (0.3") so enumerated shots have a clear corridor —
-    razor-thin passes where the cue just barely grazes another ball lead to
+    small safety margin (0.4") so enumerated shots have a clear corridor —
+    grazing passes where the cue just barely brushes another ball lead to
     unpredictable physics and are effectively not clean shots in real play.
 
     Endpoint proximity is also checked: if an obstacle is within `clearance`
@@ -111,11 +111,18 @@ def _segment_blocked(p1, p2, obstacles, exclude_ids: Iterable[int] = (),
             continue
         ex, ey = bx - x1, by - y1
         t = ex * ux + ey * uy
-        if t < 0:
-            # Obstacle is BEHIND the direction of motion — cue moves away
-            # from p1, so an obstacle behind cannot block the forward path.
-            # (In a valid physical state, distance(p1, obstacle) >= 2R anyway,
-            # so even if it were close, it's not in the cue's traveled region.)
+        # Forward-component threshold: if the obstacle's projection onto the
+        # motion direction is small or negative, the obstacle is essentially
+        # perpendicular to (or behind) the cue's motion at p1. The cue is
+        # either already past it (t<0) or moving sideways relative to it
+        # (t≈0). In either case, distance to obstacle is non-decreasing along
+        # the forward path, so no collision. The 0.5·BALL_R cutoff covers
+        # numerical drift in u (when ghost isn't perfectly axis-aligned with
+        # p1) and the frozen-ball-perpendicular case where another ball
+        # touches the cue at right angles to the shot line. In a valid pool
+        # state, distance(p1, obstacle) >= 2R, so the cue is not overlapping
+        # at the start.
+        if t <= 0.5 * R:
             continue
         if t > seg_len:
             # Obstacle is PAST the segment end (p2). The cue stops at p2, so
@@ -147,7 +154,7 @@ def _ghost_on_table(ghost_pos):
     return True
 
 
-def generate_legal_shots(cue_pos, balls, max_cut_deg=75.0, min_pocket_dist=2.0):
+def generate_legal_shots(cue_pos, balls, max_cut_deg=80.0, min_pocket_dist=1.0):
     """
     Enumerate all legal direct shots for the given state.
 
@@ -213,8 +220,19 @@ def generate_legal_shots(cue_pos, balls, max_cut_deg=75.0, min_pocket_dist=2.0):
             if _segment_blocked(cue_t, ghost, ball_map, exclude_ids=[ball_id]):
                 continue
 
-            # Line-of-sight: target ball travels from ball_pos to aim_point
-            # (and continues into the pocket past it).
+            # Line-of-sight: target ball travels from ball_pos toward the
+            # pocket entrance. We check TWO segments:
+            #   (a) ball → POCKETS[idx] (pocket-entrance line) — this is the
+            #       OB's actual physical trajectory while still on the table.
+            #   (b) ball → aim_point (deep-throat aim) — catches obstacles
+            #       inside the throat region.
+            # The aim_point alone is insufficient because for balls near a
+            # rail, the deep-throat aim is OFF the table (y < 0 for top
+            # pockets), and the angled segment misses obstacles that sit
+            # right on the rail in the OB's actual path.
+            if _segment_blocked(ball_pos, POCKETS[p_idx], ball_map,
+                                 exclude_ids=[ball_id]):
+                continue
             if _segment_blocked(ball_pos, aim_point, ball_map, exclude_ids=[ball_id]):
                 continue
 

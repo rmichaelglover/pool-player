@@ -1,0 +1,13 @@
+Paste this when you're back:                                                                                                             
+                                                                                                                                           
+  ▎ Restart the v13 demo on port 8001 (phase7_p7_v13_railfix_best.pt, --p7_no_search off — use search). I want to take some more demo shots
+  ▎  to evaluate strategic play, especially blocker-removal behavior. Don't start any training — v14 with the blocker-delta reward is just 
+  ▎ a candidate for later.                                                                                                                 
+                                                               
+  That points me at:                                                                                                                       
+  - phase7_p7_v13_railfix_best.pt (most recent checkpoint, post rail-physics fix)
+  - Demo serving on port 8001 via demo_phase6b_server.py                                                                                   
+  - The current evaluation lens (strategic depth / blocker removal — saved in feedback_play_quality.md)
+  - An explicit "don't auto-launch v14" so I don't fire training without you asking                                                        
+                                                                                                                                           
+  If you do want search on/off, swap --p7_no_search in/out — I had it off last time per your launch, which is why I called it out.    

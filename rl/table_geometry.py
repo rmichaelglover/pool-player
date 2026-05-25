@@ -126,33 +126,53 @@ _POCKET_FACING_PAIRS = (
 )
 
 
+# Side-pocket indices. The corridor narrows from cushion-line to cushion-back
+# (facings converge at 12°), so the cushion-back facing endpoints add a
+# binding clearance constraint. For corner pockets the facings are parallel,
+# the corridor is constant-width, the sim excludes facing endpoints from
+# bounces (see pool_sim.c), and the drop circle reaches into the playing
+# area enough that the ball is captured before any facing clip — so only
+# the cushion-line endpoints (where the cushion *segment* really does
+# bounce) need clearance.
+_SIDE_POCKETS = (1, 4)
+
+
 def optimal_pocket_aim(ball_pos, idx: int, n_samples: int = 64):
     """Geometrically optimal aim point for a ball at `ball_pos` targeting
-    pocket `idx`. Returns (px, py) — a point on the cushion-back chord such
-    that the ball's straight-line trajectory clears all four pocket-corner
-    endpoints (the cushion-line and cushion-back endpoints of both facings)
-    with at least BALL_R perpendicular clearance.
+    pocket `idx`. Returns (px, py) on the cushion-back chord such that the
+    ball's straight-line trajectory clears the binding pocket-corner
+    endpoints with at least BALL_R perpendicular clearance, or None if no
+    feasible direct aim exists.
 
-    Returns None if no feasible direct aim exists — meaning any straight
-    trajectory from ball_pos into the pocket would pass within BALL_R of a
-    cushion corner and bounce or clip a facing.
+    Binding endpoints (matched to the simulator's actual collision rules):
+      - Side pockets: all four corridor corners (cushion-line endpoints +
+        cushion-back endpoints). The converging facings narrow the corridor.
+      - Corner pockets: cushion-line endpoints only. Cushion-back endpoints
+        are facing endpoints that the simulator skips for bounces, and the
+        corner drop circle captures the ball before it reaches them anyway.
 
-    Implementation: sweep aim point along the cushion-back chord, picking
-    the s that maximizes the minimum perpendicular distance from the
-    trajectory line to the four corner endpoints.
+    Implementation: sweep s along the cushion-back chord (full [0, 1] for
+    corners; inset by BALL_R/L for sides where the chord clearance also
+    binds), pick the s that maximizes the minimum perpendicular distance.
     """
     bx, by = ball_pos
     fa_idx, fb_idx = _POCKET_FACING_PAIRS[idx]
     fa = FACINGS[fa_idx]; fb = FACINGS[fb_idx]
     Ax, Ay = fa[2], fa[3]      # cushion-back endpoint of facing A
     Cx, Cy = fb[2], fb[3]      # cushion-back endpoint of facing C
-    endpoints = ((fa[0], fa[1]), (fb[0], fb[1]), (Ax, Ay), (Cx, Cy))
     AC_dx = Cx - Ax; AC_dy = Cy - Ay
     L_back = math.hypot(AC_dx, AC_dy)
     if L_back < 1e-9:
         return None
-    s_min = BALL_R / L_back
-    s_max = 1.0 - s_min
+
+    if idx in _SIDE_POCKETS:
+        endpoints = ((fa[0], fa[1]), (fb[0], fb[1]), (Ax, Ay), (Cx, Cy))
+        s_min = BALL_R / L_back
+        s_max = 1.0 - s_min
+    else:
+        endpoints = ((fa[0], fa[1]), (fb[0], fb[1]))
+        s_min = 0.0
+        s_max = 1.0
     if s_min >= s_max:
         return None
 
@@ -165,6 +185,17 @@ def optimal_pocket_aim(ball_pos, idx: int, n_samples: int = 64):
         dx = qx - bx; dy = qy - by
         d_len = math.hypot(dx, dy)
         if d_len < 1e-9:
+            continue
+        # On-table ghost constraint: the cue ball center at the moment of
+        # contact must be ≥ BALL_R from every cushion (otherwise the cue
+        # ball would be embedded in the rail). For balls hugging a rail,
+        # the throat-clearance-optimal aim may put the ghost just off the
+        # playing area — those aims are physically infeasible regardless
+        # of how much throat clearance they have. Reject early.
+        ghost_x = bx - 2.0 * BALL_R * dx / d_len
+        ghost_y = by - 2.0 * BALL_R * dy / d_len
+        if not (BALL_R <= ghost_x <= TABLE_LENGTH - BALL_R and
+                BALL_R <= ghost_y <= TABLE_WIDTH - BALL_R):
             continue
         clearance = float('inf')
         for ex, ey in endpoints:

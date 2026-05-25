@@ -28,7 +28,7 @@ button.secondary { background: #555; }
 </head>
 <body>
 <h1>Pool AI — 14.1 Continuous demo</h1>
-<div class="sub">438K-param transformer + depth-2 shot search (K=24,16) running full 14.1 with rerack</div>
+<div class="sub">567K-param transformer + depth-1 shot search (K=4) running full 14.1 with rerack</div>
 
 <div class="layout">
   <div class="left">
@@ -40,6 +40,41 @@ button.secondary { background: #555; }
       <button id="startBtn">Start</button>
       <button id="pauseBtn" class="secondary" disabled>Pause</button>
       <button id="resetBtn" class="secondary" disabled>Reset</button>
+      <div style="margin-top:10px; display:flex; gap:12px; align-items:center;">
+        <label style="font-size:13px; color:#9aa0aa; cursor:pointer;">
+          <input type="radio" name="mode" value="auto" checked> Auto
+        </label>
+        <label style="font-size:13px; color:#9aa0aa; cursor:pointer;">
+          <input type="radio" name="mode" value="manual"> Manual
+        </label>
+        <button id="shootBtn" class="secondary" disabled style="margin-left:auto;">Shoot</button>
+      </div>
+      <div style="margin-top:10px; display:flex; gap:8px; align-items:center;
+                  font-size:12px; color:#9aa0aa;">
+        <label for="shotDelay">Auto delay</label>
+        <input type="range" id="shotDelay" min="0" max="4" step="0.25" value="2"
+               style="flex:1;">
+        <span id="shotDelayLabel" style="color:#f4ecd8; min-width:38px;
+              text-align:right;">2.0 s</span>
+      </div>
+      <div style="margin-top:8px; display:flex; gap:14px; align-items:center;
+                  font-size:12px; color:#9aa0aa; flex-wrap:wrap;">
+        <label style="cursor:pointer;">
+          <input type="checkbox" id="autoResetToggle"> auto-reset on game end
+        </label>
+        <label style="cursor:pointer;">
+          <input type="checkbox" id="saveRunsToggle" checked> save top-3 runs
+        </label>
+      </div>
+      <div style="margin-top:8px; display:flex; gap:8px; align-items:center;
+                  font-size:12px; color:#9aa0aa;">
+        <label for="savedRunsSelect">Replay</label>
+        <select id="savedRunsSelect" style="flex:1; background:#1a1f2a;
+                color:#f4ecd8; border:1px solid #3a4250; padding:3px;">
+          <option value="">(no run selected)</option>
+        </select>
+        <button id="loadRunBtn" class="secondary" style="padding:3px 8px;">Load</button>
+      </div>
     </div>
     <div class="label">Game state</div>
     <div class="stat"><span class="k">Shot #</span><span class="v" id="shotIdx">0</span></div>
@@ -185,6 +220,28 @@ function drawTable() {
     ctx.beginPath();
     ctx.arc(tx(75), ty(25), 2, 0, Math.PI * 2);
     ctx.stroke();
+
+    // Rack outline — triangle around the 14 reracked positions so it's
+    // visually obvious whether the break ball is inside the rack area
+    // (and thus must be respotted) or outside (and stays put). Vertices
+    // derived from the same constants as train_phase6.RACK_POSITIONS:
+    //   apex = (75, 25); back row at dx = 4*_ROW_DX with dy = ±4.5 (row 4).
+    // _ROW_DX = 2R * sqrt(3)/2 + 0.02 ≈ 1.969; _BALL_DY = 2R + 0.02 ≈ 2.27;
+    // back-row centers are at x≈82.876, y∈[20.46, 29.54].
+    // The outline is drawn through the ball CENTERS at the apex and the
+    // two back corners (so it's a tight triangle around the rack frame).
+    const APX = 75, APY = 25;
+    const BACK_X = 82.876, BACK_Y_HI = 29.54, BACK_Y_LO = 20.46;
+    ctx.strokeStyle = 'rgba(127, 184, 220, 0.35)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.moveTo(tx(APX), ty(APY));
+    ctx.lineTo(tx(BACK_X), ty(BACK_Y_LO));
+    ctx.lineTo(tx(BACK_X), ty(BACK_Y_HI));
+    ctx.closePath();
+    ctx.stroke();
+    ctx.setLineDash([]);
 }
 
 // Pocket capture predicate (matches table_geometry.pocket_captures and
@@ -244,11 +301,151 @@ let sessionId = Math.random().toString(36).slice(2);
 let running = false;
 let paused = false;
 let animTimer = null;
+let mode = 'auto';                 // 'auto' or 'manual'
+let waitingForShoot = false;       // true while manual mode is awaiting click
+let lastLegalShots = [];           // most-recently fetched legal shots
+
+// ── Save/replay state ──────────────────────────────────────────────────────
+// currentRun captures the run-in-progress (init state + shot params); on
+// game-end if the save toggle is on, it gets POSTed to /save_run.
+let currentRun = null;
+// When replaying, replayRun is the saved-run JSON we're walking through and
+// replayShotIdx is the index of the next shot to execute.
+let replayRun = null;
+let replayShotIdx = 0;
 
 function render(cue, balls) {
     drawTable();
     for (const b of balls) drawBall(b.x, b.y, false, b.id);
     drawBall(cue[0], cue[1], true, null);
+}
+
+async function fetchLegalShots() {
+    try {
+        const r = await fetch('/legal_shots', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({session_id: sessionId, temperature: 1.0}),
+        });
+        const data = await r.json();
+        return {
+            shots: data.shots || [],
+            break_candidate_ball_ids: data.break_candidate_ball_ids || [],
+        };
+    } catch (e) {
+        console.warn('legal_shots fetch failed', e);
+        return { shots: [], break_candidate_ball_ids: [] };
+    }
+}
+
+function drawBreakBallCandidates(candidateIds, balls) {
+    if (!candidateIds || !candidateIds.length) return;
+    ctx.save();
+    ctx.setLineDash([]);
+    ctx.strokeStyle = '#ff7043';   // orange-red — clearly distinct from gold/blue
+    ctx.lineWidth = 2.5;
+    for (const cid of candidateIds) {
+        const ball = balls.find(b => b.id === cid);
+        if (!ball) continue;
+        ctx.beginPath();
+        ctx.arc(tx(ball.x), ty(ball.y), BALL_R * scaleX + 4, 0, Math.PI * 2);
+        ctx.stroke();
+    }
+    ctx.restore();
+}
+
+function drawLegalShotLines(shots, balls) {
+    if (!shots || !shots.length) return;
+    ctx.save();
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = 'rgba(150, 180, 220, 0.45)';
+    ctx.lineWidth = 1;
+    for (const s of shots) {
+        const ball = balls.find(b => b.id === s.ball_id);
+        if (!ball) continue;
+        const [px, py] = POCKETS[s.pocket_idx];
+        ctx.beginPath();
+        ctx.moveTo(tx(ball.x), ty(ball.y));
+        ctx.lineTo(tx(px), ty(py));
+        ctx.stroke();
+    }
+    ctx.restore();
+    // Probability text — draw in a second pass so it reads above the lines.
+    ctx.save();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#f4ecd8';                          // cream — readable on slate
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.7)';            // dark outline for legibility
+    ctx.lineWidth = 3;
+    ctx.font = '11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (const s of shots) {
+        if (s.prob == null) continue;
+        const ball = balls.find(b => b.id === s.ball_id);
+        if (!ball) continue;
+        const [px, py] = POCKETS[s.pocket_idx];
+        // Place text 35% from ball toward pocket (closer to OB so multiple
+        // shots from the same ball don't all collide near the pocket).
+        const tx_pos = tx(ball.x + 0.35 * (px - ball.x));
+        const ty_pos = ty(ball.y + 0.35 * (py - ball.y));
+        const fmtProb = (p) => (p >= 0.10
+            ? p.toFixed(2)
+            : p.toFixed(4).replace(/^0\./, '.'));
+        // For suppressed (candidate) shots, show "raw/suppressed". For
+        // unsuppressed shots, show just the single prob.
+        const suppressed = (s.prob_raw != null
+                            && Math.abs(s.prob - s.prob_raw) > 0.0005);
+        const probTxt = suppressed
+            ? `${fmtProb(s.prob_raw)}/${fmtProb(s.prob)}`
+            : fmtProb(s.prob);
+        const cutTxt = (s.cut_angle_deg != null)
+            ? `${s.cut_angle_deg.toFixed(0)}°`
+            : '';
+        const txt = cutTxt ? `${probTxt} | ${cutTxt}` : probTxt;
+        ctx.strokeText(txt, tx_pos, ty_pos);
+        ctx.fillText(txt, tx_pos, ty_pos);
+    }
+    ctx.restore();
+}
+
+async function showLegalShotsForCurrentState() {
+    if (!currentState) return;
+    const data = await fetchLegalShots();
+    lastLegalShots = data.shots;
+    drawLegalShotLines(lastLegalShots, currentState.balls);
+    drawBreakBallCandidates(data.break_candidate_ball_ids,
+                              currentState.balls);
+}
+
+async function fetchPreview() {
+    try {
+        const r = await fetch('/preview', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({session_id: sessionId}),
+        });
+        return await r.json();
+    } catch (e) {
+        console.warn('preview fetch failed', e);
+        return null;
+    }
+}
+
+function drawPreviewCueToBallLine(preview, balls) {
+    if (!preview || preview.called_id == null) return;
+    const ball = balls.find(b => b.id === preview.called_id);
+    if (!ball) return;
+    const cuePos = preview.cue_pos;
+    if (!cuePos) return;
+    ctx.save();
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = '#f3c77a';   // gold — same hue family as called-pocket ring
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.moveTo(tx(cuePos[0]), ty(cuePos[1]));
+    ctx.lineTo(tx(ball.x), ty(ball.y));
+    ctx.stroke();
+    ctx.restore();
 }
 
 function highlightCall(calledId, calledPocketIdx, aimDeg, state) {
@@ -394,12 +591,23 @@ async function setupGame() {
     const r = await fetch('/start', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({session_id: sessionId, max_shots: 100}),
+        body: JSON.stringify({session_id: sessionId, max_shots: 900}),
     });
     const data = await r.json();
     TABLE_L = data.table_length; TABLE_W = data.table_width; BALL_R = data.ball_radius;
     recomputeScale();
     currentState = {cue: data.cue, balls: data.balls};
+    // Initialize the run-capture buffer. Balls is an array of {id, x, y}
+    // in the server response; convert to a {id: [x, y]} dict for storage.
+    const initBalls = {};
+    for (const b of data.balls) { initBalls[b.id] = [b.x, b.y]; }
+    currentRun = {
+        initial_cue: [...data.cue],
+        initial_balls: initBalls,
+        shots: [],
+        total_pocketed: 0,
+        rerack_count: 0,
+    };
     render(currentState.cue, currentState.balls);
     updateStats({
         shotIdx: 0, totalPocketed: 0, rackIdx: 1, rerackCount: 0,
@@ -409,6 +617,9 @@ async function setupGame() {
     document.getElementById('startBtn').disabled = false;
     document.getElementById('pauseBtn').disabled = true;
     document.getElementById('resetBtn').disabled = false;
+    // Show legal shots on the initial layout so the user can see them
+    // before deciding whether to start.
+    await showLegalShotsForCurrentState();
 }
 
 async function startGame() {
@@ -422,19 +633,90 @@ async function startGame() {
     document.getElementById('resetBtn').disabled = false;
     running = true;
     paused = false;
-    document.getElementById('msg').textContent = 'Running...';
-    // Fire first shot after a brief pause
-    setTimeout(nextShot, 1200);
+    if (mode === 'manual') {
+        document.getElementById('shootBtn').disabled = false;
+        waitingForShoot = true;
+        // Show what the AI plans for the very first shot.
+        const preview = await fetchPreview();
+        drawPreviewCueToBallLine(preview, currentState.balls);
+        // Show planned spin/force visuals so user sees them before pressing Shoot.
+        if (preview && preview.spin !== undefined) drawTipContact(preview.spin);
+        if (preview && preview.force !== undefined) drawForceBar(preview.force);
+        const POCKET_NAMES = ['TL', 'T-side', 'TR', 'BL', 'B-side', 'BR'];
+        const planned = preview && preview.called_id != null
+            ? `plan: ball ${preview.called_id} → ${POCKET_NAMES[preview.called_pocket]}`
+            : 'no plan';
+        document.getElementById('msg').textContent =
+            `Manual — ${planned}. Click Shoot for first shot.`;
+    } else {
+        document.getElementById('msg').textContent = 'Running...';
+        setTimeout(nextShot, 1200);
+    }
 }
 
 async function nextShot() {
     if (!running || paused) return;
-    const r = await fetch('/next_shot', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({session_id: sessionId, K1: 24, K2: 16}),
-    });
+    let r;
+    if (replayRun !== null) {
+        // Replay mode: ask the server to re-execute the next saved shot.
+        // On the first shot of the replay we also send the saved initial
+        // cue/balls state to override the env's random reset.
+        if (replayShotIdx >= replayRun.shots.length) {
+            running = false;
+            document.getElementById('msg').textContent =
+                `Replay finished — ${replayRun.total_pocketed} balls.`;
+            document.getElementById('startBtn').disabled = false;
+            return;
+        }
+        const sh = replayRun.shots[replayShotIdx];
+        const body = {
+            session_id: sessionId,
+            ball_id: sh.ball_id,
+            pocket_idx: sh.pocket_idx,
+            force_raw: sh.force_raw,
+            spin_raw: sh.spin_raw,
+        };
+        if (replayShotIdx === 0) {
+            body.initial_cue = replayRun.initial_cue;
+            body.initial_balls = replayRun.initial_balls;
+        }
+        replayShotIdx += 1;
+        r = await fetch('/replay_shot', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+        });
+    } else {
+        r = await fetch('/next_shot', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({session_id: sessionId, K1: 24, K2: 16}),
+        });
+    }
     const data = await r.json();
+    // Capture the shot's params for save-on-end (live play only).
+    // We also snapshot the cue/balls state BEFORE this shot fired (i.e.,
+    // the pre-shot state == currentState before we update it below), so
+    // the server can slice to "last N shots" by using shots[N-K].state_before
+    // as the replay starting point.
+    if (replayRun === null && currentRun !== null && data.called_id != null &&
+        typeof data.force_raw === 'number') {
+        const preBalls = {};
+        for (const b of currentState.balls) { preBalls[b.id] = [b.x, b.y]; }
+        currentRun.shots.push({
+            ball_id: data.called_id,
+            pocket_idx: data.called_pocket,
+            force_raw: data.force_raw,
+            spin_raw: data.spin_raw,
+            aim_deg: data.aim_deg,
+            state_before: {
+                cue: [...currentState.cue],
+                balls: preBalls,
+            },
+        });
+        currentRun.total_pocketed = data.total_pocketed;
+        currentRun.rerack_count = data.rerack_count;
+    }
     if (data.error) {
         document.getElementById('msg').textContent = 'Error: ' + data.error;
         running = false; return;
@@ -464,7 +746,7 @@ async function nextShot() {
     highlightCall(data.called_id, data.called_pocket, data.aim_deg, currentState);
 
     setTimeout(() => {
-        animateTrajectory(data.trajectory, data.ball_ids_order, data.pocketed_ids, () => {
+        animateTrajectory(data.trajectory, data.ball_ids_order, data.pocketed_ids, async () => {
         // Snap to post-shot state (handles rerack)
         currentState = {cue: data.cue_after, balls: data.balls_after};
         render(currentState.cue, currentState.balls);
@@ -482,13 +764,74 @@ async function nextShot() {
             running = false;
             document.getElementById('startBtn').disabled = false;
             document.getElementById('pauseBtn').disabled = true;
+            document.getElementById('shootBtn').disabled = true;
             const reason = data.scratch ? 'scratched' :
                            (data.pocketed_ids.length === 0 ? 'missed' : 'reached max shots');
             document.getElementById('msg').textContent =
                 `Done — ${data.total_pocketed} balls pocketed across ${data.rerack_count + 1} rack(s). (${reason})`;
+            // Save the run if the toggle is on and this wasn't a replay.
+            const saveToggle = document.getElementById('saveRunsToggle');
+            if (replayRun === null && saveToggle && saveToggle.checked
+                && currentRun && data.total_pocketed > 0) {
+                fetch('/save_run', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        initial_cue: currentRun.initial_cue,
+                        initial_balls: currentRun.initial_balls,
+                        shots: currentRun.shots,
+                        total_pocketed: data.total_pocketed,
+                        rerack_count: data.rerack_count,
+                        timestamp: new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19),
+                    }),
+                }).then(resp => resp.json()).then(saveResp => {
+                    if (saveResp.saved) {
+                        const cur = document.getElementById('msg').textContent;
+                        document.getElementById('msg').textContent =
+                            cur + ` [saved as ${saveResp.filename}]`;
+                    }
+                    refreshSavedRunsList();
+                }).catch(() => {});
+            }
+            // Auto-reset if toggled on (live play only, not during replay).
+            const arToggle = document.getElementById('autoResetToggle');
+            if (replayRun === null && arToggle && arToggle.checked) {
+                setTimeout(async () => {
+                    await setupGame();
+                    startGame();
+                }, 1500);
+            }
+            // Clear replay state so the next game is live again.
+            replayRun = null;
+            replayShotIdx = 0;
+            return;
+        }
+        // Show legal shots for the new state, then either auto-fire or
+        // wait for a Shoot click depending on mode.
+        await showLegalShotsForCurrentState();
+        if (mode === 'manual') {
+            // Run preview to know what the AI plans to shoot, then draw
+            // a cue→called-ball line on top of the legal-shot lines.
+            const preview = await fetchPreview();
+            drawPreviewCueToBallLine(preview, currentState.balls);
+            // Update tip contact + force bar with the PLANNED values so
+            // user sees the AI's intended english/force before pressing Shoot.
+            if (preview && preview.spin !== undefined) drawTipContact(preview.spin);
+            if (preview && preview.force !== undefined) drawForceBar(preview.force);
+            document.getElementById('shootBtn').disabled = false;
+            waitingForShoot = true;
+            const planned = preview && preview.called_id != null
+                ? `plan: ball ${preview.called_id} → ${POCKET_NAMES[preview.called_pocket]}`
+                : 'no plan';
+            document.getElementById('msg').textContent =
+                `Manual — ${lastLegalShots.length} legal shot(s); ${planned}. Click Shoot.`;
         } else {
-            // Schedule next shot (pacing ~5 sec between shots; trajectory animation takes ~1-3s)
-            setTimeout(nextShot, 2000);
+            // Schedule next shot. Post-animation delay controlled by the
+            // "Auto delay" slider (0..4 s, default 2 s). Trajectory
+            // animation itself takes ~1-3 s and isn't paced by this.
+            const delaySec = parseFloat(
+                document.getElementById('shotDelay')?.value || '2');
+            setTimeout(nextShot, Math.round(delaySec * 1000));
         }
         });
     }, 1000);   // 1 second of aim-display before animation starts
@@ -499,6 +842,53 @@ function updateStats(s) {
         const el = document.getElementById(k);
         if (el) el.textContent = s[k];
     }
+}
+
+// ── Saved runs UI ──────────────────────────────────────────────────────────
+async function refreshSavedRunsList() {
+    try {
+        const r = await fetch('/list_runs', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: '{}',
+        });
+        const data = await r.json();
+        const sel = document.getElementById('savedRunsSelect');
+        if (!sel) return;
+        const prev = sel.value;
+        sel.innerHTML = '<option value="">(no run selected)</option>';
+        for (const e of data.runs || []) {
+            const opt = document.createElement('option');
+            opt.value = e.filename;
+            const kindTag = e.kind === 'full' ? ' [full]' : ' [end]';
+            opt.textContent = `${e.balls} balls / ${e.reracks + 1} racks${kindTag}` +
+                              (e.timestamp ? ' — ' + e.timestamp.slice(0, 10) : '');
+            sel.appendChild(opt);
+        }
+        if (prev) sel.value = prev;
+    } catch (e) { /* ignore */ }
+}
+
+async function loadSelectedRun() {
+    const sel = document.getElementById('savedRunsSelect');
+    if (!sel || !sel.value) return;
+    const fname = sel.value;
+    const r = await fetch('/get_run', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({filename: fname}),
+    });
+    const data = await r.json();
+    if (data.error) {
+        document.getElementById('msg').textContent = 'Load failed: ' + data.error;
+        return;
+    }
+    // Set up a fresh session for the replay.
+    await setupGame();
+    replayRun = data;
+    replayShotIdx = 0;
+    document.getElementById('msg').textContent =
+        `Replaying ${data.total_pocketed}-ball run — click Start.`;
 }
 
 const tipCanvas = document.getElementById('tipCanvas');
@@ -561,20 +951,45 @@ document.getElementById('startBtn').onclick = startGame;
 document.getElementById('pauseBtn').onclick = () => {
     paused = !paused;
     document.getElementById('pauseBtn').textContent = paused ? 'Resume' : 'Pause';
-    if (!paused && running) {
+    if (!paused && running && mode === 'auto') {
         // If paused mid-trajectory, drawFrame polls for paused flag. If paused
         // between shots, we need to kick off next shot.
         if (!animTimer) setTimeout(nextShot, 100);
     }
 };
 document.getElementById('resetBtn').onclick = async () => {
-    running = false; paused = false;
+    running = false; paused = false; waitingForShoot = false;
     if (animTimer) { clearTimeout(animTimer); animTimer = null; }
     document.getElementById('pauseBtn').disabled = true;
     document.getElementById('pauseBtn').textContent = 'Pause';
+    document.getElementById('shootBtn').disabled = true;
     document.getElementById('msg').textContent = 'Loading new setup…';
     await setupGame();   // fetch fresh session and render — don't start play
 };
+document.getElementById('shootBtn').onclick = () => {
+    if (!waitingForShoot) return;
+    waitingForShoot = false;
+    document.getElementById('shootBtn').disabled = true;
+    nextShot();
+};
+// Auto-delay slider — update label as user drags.
+document.getElementById('shotDelay').addEventListener('input', (e) => {
+    document.getElementById('shotDelayLabel').textContent =
+        parseFloat(e.target.value).toFixed(2) + ' s';
+});
+// Replay: load button.
+document.getElementById('loadRunBtn').onclick = loadSelectedRun;
+document.querySelectorAll('input[name="mode"]').forEach(el => {
+    el.onchange = () => {
+        mode = document.querySelector('input[name="mode"]:checked').value;
+        // If switching to auto while waiting, fire immediately.
+        if (mode === 'auto' && waitingForShoot && running && !paused) {
+            waitingForShoot = false;
+            document.getElementById('shootBtn').disabled = true;
+            setTimeout(nextShot, 300);
+        }
+    };
+});
 
 // On page load: fetch table geometry from server, then set up an initial
 // game (balls on table, ready for break shot).
@@ -584,6 +999,7 @@ drawTable();
     await fetchGeometry();
     drawTable();
     setupGame();
+    refreshSavedRunsList();
 })();
 </script>
 </body>

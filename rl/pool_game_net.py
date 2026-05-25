@@ -40,7 +40,7 @@ TABLE_WIDTH = 50.0
 # Action output scales
 FORCE_LO = 50.0
 FORCE_HI = 250.0
-SPIN_MAX = 2.0
+SPIN_MAX = 1.5    # was 2.0; lowered to limit max-draw + max-force combinations
 
 # Padding limits
 MAX_BALLS = 16   # cue + 15 object

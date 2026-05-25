@@ -25,6 +25,8 @@ _lib.simulate_shot.argtypes = [
     ctypes.POINTER(ctypes.c_double),  # traj_out (may be NULL)
     ctypes.POINTER(ctypes.c_int),     # traj_n_out (may be NULL)
     ctypes.c_int,                      # traj_max_frames
+    ctypes.POINTER(ctypes.c_double),  # cue_path_len_out
+    ctypes.POINTER(ctypes.c_int),     # cue_contacts_out
 ]
 
 # Mapping from legacy discrete spin_type → continuous spin_factor.
@@ -42,6 +44,8 @@ class ShotResult:
     cue_scratched: bool      # True if cue ball (id=0) was pocketed
     hit_ball: bool           # True if cue ball contacted any object ball
     hit_rail: bool           # True if any ball hit a cushion after contact
+    cue_path_len: float = 0.0  # Cue-ball travel post-first-contact (inches)
+    cue_contacts: int = 0      # Number of cue→OB ball-ball collisions
     trajectory: object = None  # Optional: np.ndarray (frames, n_balls, 2)
 
 
@@ -99,6 +103,9 @@ def simulate_shot(cue_pos, ball_positions, cue_vx, cue_vy,
         traj_n_ptr = ctypes.POINTER(ctypes.c_int)()    # NULL
         traj_max = 0
 
+    cue_path_len_c = ctypes.c_double(0.0)
+    cue_contacts_c = ctypes.c_int(0)
+
     _lib.simulate_shot(
         pos_in, n,
         ctypes.c_double(cue_vx), ctypes.c_double(cue_vy),
@@ -107,6 +114,8 @@ def simulate_shot(cue_pos, ball_positions, cue_vx, cue_vy,
         pos_out, pocketed_out,
         ctypes.byref(hit_ball), ctypes.byref(hit_rail),
         traj_ptr, traj_n_ptr, ctypes.c_int(traj_max),
+        ctypes.byref(cue_path_len_c),
+        ctypes.byref(cue_contacts_c),
     )
 
     final = {}
@@ -129,5 +138,7 @@ def simulate_shot(cue_pos, ball_positions, cue_vx, cue_vy,
         cue_scratched=(0 in pocketed),
         hit_ball=bool(hit_ball.value),
         hit_rail=bool(hit_rail.value),
+        cue_path_len=float(cue_path_len_c.value),
+        cue_contacts=int(cue_contacts_c.value),
         trajectory=trajectory,
     )

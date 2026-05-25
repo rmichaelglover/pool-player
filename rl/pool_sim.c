@@ -18,12 +18,18 @@
 #define MU_SLIDE  0.20     /* sliding friction (ball on cloth) */
 #define MU_ROLL   0.015    /* rolling resistance */
 #define GRAV      386.09   /* gravity in/s^2 */
-#define CUSH_R    0.75     /* cushion restitution */
+#define CUSH_R    0.70     /* cushion restitution (real cushions ≈ 0.55-0.70) */
 #define BALL_R    0.96     /* ball-ball restitution */
 #define DT        (1.0/300.0)
 #define VT        0.10     /* velocity threshold for stopping */
 #define SLIP_VT   0.05     /* slip velocity threshold for rolling transition */
 #define MAX_STEPS 3000     /* 10 seconds of sim time */
+#define EPS_FROZEN 0.10    /* a ball within this gap of a rail is treated as
+                              "frozen" — at collision, the rail provides an
+                              instantaneous normal reaction that kills any
+                              velocity component pushing into it. Without this,
+                              rail-frozen object balls bounce off the cushion
+                              at an angle when struck and miss the pocket. */
 
 /* ── Table geometry (must match rl/table_geometry.py) ──
  * Diamond pocket spec: corner mouth 4.5″, side mouth 5″, cushion 2″,
@@ -194,11 +200,19 @@ int simulate_shot(
     /* Optional trajectory recording: if traj_out is non-NULL, every
      * TRAJ_STRIDE internal steps we write a frame of (x0,y0,x1,y1,...)
      * into traj_out, up to traj_max_frames. On return, *traj_n_out holds
-     * the number of frames actually written (0 if traj_out is NULL). */
-    double *traj_out, int *traj_n_out, int traj_max_frames)
+     * the number of frames actually written (0 if traj_out is NULL).
+     *
+     * Optional cue-ball path length: if cue_path_len_out is non-NULL,
+     * accumulates total distance traveled by the cue ball (sum of
+     * |v|*DT each step while not pocketed) and writes the result. */
+    double *traj_out, int *traj_n_out, int traj_max_frames,
+    double *cue_path_len_out,
+    int *cue_contacts_out)
 {
     const int TRAJ_STRIDE = 6;  /* 300 Hz / 6 = 50 frames per second */
     int traj_n = 0;
+    double cue_path_len = 0.0;
+    int cue_contacts = 0;
     if (n_balls > MAX_BALLS) n_balls = MAX_BALLS;
 
     Ball b[MAX_BALLS];
@@ -230,8 +244,15 @@ int simulate_shot(
      *   spin_factor = -1    → full backspin
      *   spin_factor = -2    → max draw */
     if (sqrt(cue_vx * cue_vx + cue_vy * cue_vy) > 0.1) {
-        b[0].wy =  spin_factor * b[0].vx / R;
-        b[0].wx = -spin_factor * b[0].vy / R;
+        /* Spin coupling factor: dampens follow/draw effects to better match
+         * real-world cue/cloth/ball interaction. Empirically calibrated:
+         * 1.0 = full theoretical spin (model says spin_factor=-1 → backspin
+         * matching natural roll). 0.7 = realistic skilled-player draw range
+         * across all spin values without exaggerating low-draw effects. */
+        const double SPIN_COUPLE = 0.7;
+        double sf = spin_factor * SPIN_COUPLE;
+        b[0].wy =  sf * b[0].vx / R;
+        b[0].wx = -sf * b[0].vy / R;
     }
 
     for (int step = 0; step < MAX_STEPS; step++) {
@@ -256,6 +277,10 @@ int simulate_shot(
             if (sp > VT || aw > SLIP_VT) all_stopped = 0;
             b[i].x += b[i].vx * DT;
             b[i].y += b[i].vy * DT;
+            /* Cue-ball path length: only counts AFTER first OB contact, since
+             * pre-contact travel is forced by shot geometry, not a control
+             * choice. *hit_ball is set to 1 at the cue→OB collision below. */
+            if (i == 0 && *hit_ball) cue_path_len += sp * DT;
         }
         if (all_stopped) break;
 
@@ -305,8 +330,26 @@ int simulate_shot(
                     b[i].vx -= jj*nx;  b[i].vy -= jj*ny;
                     b[j].vx += jj*nx;  b[j].vy += jj*ny;
 
+                    /* 3-body constraint: if either ball is rail-frozen, the
+                     * rail absorbs any inward impulse (instantaneous reaction).
+                     * Project the post-collision velocity onto the rail-parallel
+                     * direction so the ball travels ALONG the rail rather than
+                     * bouncing off it at an angle. */
+                    for (int k = 0; k < 2; k++) {
+                        int idx = (k == 0) ? i : j;
+                        if (b[idx].y < R + EPS_FROZEN && b[idx].vy < 0)
+                            b[idx].vy = 0;
+                        if (b[idx].y > TW - R - EPS_FROZEN && b[idx].vy > 0)
+                            b[idx].vy = 0;
+                        if (b[idx].x < R + EPS_FROZEN && b[idx].vx < 0)
+                            b[idx].vx = 0;
+                        if (b[idx].x > TL - R - EPS_FROZEN && b[idx].vx > 0)
+                            b[idx].vx = 0;
+                    }
+
                     if (is_cue) {
                         *hit_ball = 1;
+                        cue_contacts++;
                         /* Spin transfers naturally through the friction model —
                          * no need to apply spin impulse at collision.
                          * The cue ball's angular velocity persists through the
@@ -371,11 +414,12 @@ int simulate_shot(
                 if (vdotn < 0.0) {
                     b[i].vx -= (1.0 + CUSH_R) * vdotn * snx;
                     b[i].vy -= (1.0 + CUSH_R) * vdotn * sny;
-                    /* Force angular velocity to natural-roll value for the
-                     * new linear velocity (matches old behavior — dissipate
-                     * excess spin during cushion contact). */
-                    b[i].wy =  b[i].vx / R;
-                    b[i].wx = -b[i].vy / R;
+                    /* Spin is preserved across the bounce (angular momentum
+                     * doesn't instantly reorient). Post-bounce, the ball
+                     * usually slides briefly because spin no longer matches
+                     * the new linear velocity — sliding friction handles the
+                     * realignment, dissipating extra energy. This is the
+                     * physically correct behavior. */
                     bounced = 1;
                 }
             }
@@ -434,6 +478,8 @@ int simulate_shot(
         traj_n++;
     }
     if (traj_n_out != NULL) *traj_n_out = traj_n;
+    if (cue_path_len_out != NULL) *cue_path_len_out = cue_path_len;
+    if (cue_contacts_out != NULL) *cue_contacts_out = cue_contacts;
 
     for (int i = 0; i < n_balls; i++) {
         pos_out[i*2]   = b[i].x;
