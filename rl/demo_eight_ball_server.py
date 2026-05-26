@@ -49,7 +49,7 @@ def load_net(ckpt_path, embed_dim=128, num_heads=8, num_layers=4,
     _net = EightBallNet(embed_dim=embed_dim, num_heads=num_heads,
                         num_layers=num_layers).to(_device)
     state = torch.load(ckpt_path, map_location=_device, weights_only=True)
-    _net.load_state_dict(state)
+    _net.load_state_dict(state, strict=False)
     _net.eval()
     print(f'Loaded 8-ball net: {ckpt_path} ({sum(p.numel() for p in _net.parameters()):,} params)')
 
@@ -114,6 +114,30 @@ def handle_next_shot(payload):
     player = env.current_player
     obs = env.get_obs()
 
+    # Handle learned ball-in-hand placement
+    if env.awaiting_placement:
+        batch = obs_to_batch(obs, _device)
+        with torch.no_grad():
+            _, xn, yn, _, value = _net.get_action(batch, deterministic=True)
+        obs_next, reward, done, info = env.step_placement(xn.item(), yn.item())
+        return {
+            'trajectory': [], 'ball_ids_order': [],
+            'pocketed_ids': [], 'scratch': False,
+            'foul': None,
+            'is_safety': False,
+            'is_placement': True,
+            'player': player,
+            'called_id': None, 'called_pocket': -1,
+            'aim_deg': 0, 'force': 0, 'spin_factor': 0,
+            'done': done,
+            'cue_after': list(env.cue),
+            'balls_after': serialize_balls(env),
+            'search_ms': (time.time() - t0) * 1000,
+            'value': float(value.item()),
+            'reason': f'BIH placement at ({env.cue[0]:.1f}, {env.cue[1]:.1f})',
+            **game_state_dict(env),
+        }
+
     if not obs.shot_meta:
         obs_next, reward, done, info = env.step(
             0, 0.0, 0.0, obs,
@@ -137,11 +161,8 @@ def handle_next_shot(payload):
 
     batch = obs_to_batch(obs, _device)
     with torch.no_grad():
-        scores, f_means, s_means, _, value = _net.forward(**batch)
+        scores, f_means, s_means, _, value, _ = _net.forward(**batch)
 
-    # Pick best real shot — bypass safety logit (v1 net hasn't learned
-    # meaningful safety play, so safety always wins argmax and every
-    # shot would pass the turn even when pocketing own balls).
     n_legal = len(obs.shot_meta)
     action_idx_val = int(scores[0, :n_legal].argmax().item())
     force_raw_val = float(f_means[0, action_idx_val].item())

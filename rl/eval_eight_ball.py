@@ -24,7 +24,7 @@ def load_model(path, device='cpu', embed_dim=128, num_heads=8, num_layers=4):
                        num_layers=num_layers).to(device)
     if path and os.path.exists(path):
         state = torch.load(path, map_location=device, weights_only=True)
-        net.load_state_dict(state)
+        net.load_state_dict(state, strict=False)
     return net
 
 
@@ -53,6 +53,14 @@ def play_game(net_a, net_b, device='cpu', env_kwargs=None):
         player = env.current_player
         net = nets[player]
         obs_batch = obs_to_batch(obs, device)
+
+        if env.awaiting_placement:
+            with torch.no_grad():
+                _, xn, yn, _, _ = net.get_action(obs_batch, deterministic=True)
+            obs, reward, done, info = env.step_placement(xn.item(), yn.item())
+            if done:
+                break
+            continue
 
         with torch.no_grad():
             action_idx, force_raw, spin_raw, _, _ = net.get_action(

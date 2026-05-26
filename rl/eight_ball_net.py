@@ -115,8 +115,16 @@ class EightBallNet(nn.Module):
             nn.GELU(),
             nn.Linear(embed_dim, 1),
         )
+        # Placement head: (x, y) in [0, 1] via sigmoid for ball-in-hand
+        self.placement_head = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, 2),
+        )
         # Learnable log std for force and spin
         self.log_std = nn.Parameter(torch.full((2,), -0.5))
+        # Learnable log std for placement (x, y) — starts wider for exploration
+        self.placement_log_std = nn.Parameter(torch.full((2,), -1.0))
 
         self._init_weights()
 
@@ -132,6 +140,8 @@ class EightBallNet(nn.Module):
         nn.init.zeros_(self.value_head[-1].bias)
         nn.init.orthogonal_(self.safety_head.weight, gain=0.01)
         nn.init.constant_(self.safety_head.bias, -5.0)
+        nn.init.orthogonal_(self.placement_head[-1].weight, gain=0.01)
+        nn.init.zeros_(self.placement_head[-1].bias)
 
     def forward(self, balls, ball_mask, ball_group, pockets,
                 game_state, shots, shot_mask):
@@ -191,22 +201,54 @@ class EightBallNet(nn.Module):
         # Value: win probability
         value = torch.sigmoid(self.value_head(pooled).squeeze(-1))
 
-        return shot_scores, force_means, spin_means, safety_logit, value
+        return shot_scores, force_means, spin_means, safety_logit, value, pooled
+
+    def get_placement(self, pooled, deterministic=False):
+        raw = self.placement_head(pooled)
+        mu = torch.sigmoid(raw)
+        std = torch.exp(self.placement_log_std)
+        if deterministic:
+            xy = mu
+            log_prob = torch.zeros(mu.shape[0], device=mu.device)
+        else:
+            x_dist = Normal(mu[:, 0], std[0])
+            y_dist = Normal(mu[:, 1], std[1])
+            x_samp = x_dist.sample().clamp(0.0, 1.0)
+            y_samp = y_dist.sample().clamp(0.0, 1.0)
+            xy = torch.stack([x_samp, y_samp], dim=-1)
+            log_prob = x_dist.log_prob(x_samp) + y_dist.log_prob(y_samp)
+        return xy, log_prob
+
+    def _evaluate_placement(self, pooled, x_norm, y_norm):
+        raw = self.placement_head(pooled)
+        mu = torch.sigmoid(raw)
+        std = torch.exp(self.placement_log_std)
+        x_dist = Normal(mu[:, 0], std[0])
+        y_dist = Normal(mu[:, 1], std[1])
+        log_prob = x_dist.log_prob(x_norm) + y_dist.log_prob(y_norm)
+        entropy = x_dist.entropy() + y_dist.entropy()
+        return log_prob, entropy
 
     def get_action(self, obs_batch, deterministic=False):
-        scores, f_means, s_means, safety_logit, value = self.forward(**obs_batch)
+        scores, f_means, s_means, safety_logit, value, pooled = self.forward(**obs_batch)
+
+        is_placement = obs_batch['game_state'][:, 5] > 0.5
+        if is_placement.any() and is_placement.all():
+            xy, log_prob = self.get_placement(pooled, deterministic)
+            action_idx = torch.full((xy.shape[0],), -1, dtype=torch.long,
+                                    device=xy.device)
+            return action_idx, xy[:, 0], xy[:, 1], log_prob, value
+
         force_std = torch.exp(self.log_std[0])
         spin_std = torch.exp(self.log_std[1])
 
-        # Append safety logit to shot scores for combined categorical
-        # scores: (B, MAX_SHOTS), safety_logit: (B, 1)
-        combined_logits = torch.cat([scores, safety_logit], dim=-1)  # (B, MAX_SHOTS+1)
+        combined_logits = torch.cat([scores, safety_logit], dim=-1)
 
         if deterministic:
             action_idx = combined_logits.argmax(dim=-1)
             is_safety = (action_idx == MAX_SHOTS)
             shot_idx = action_idx.clone()
-            shot_idx[is_safety] = 0  # placeholder for gather
+            shot_idx[is_safety] = 0
             f_mu = f_means.gather(1, shot_idx.unsqueeze(-1)).squeeze(-1)
             s_mu = s_means.gather(1, shot_idx.unsqueeze(-1)).squeeze(-1)
             f_mu[is_safety] = 0.0
@@ -235,31 +277,59 @@ class EightBallNet(nn.Module):
 
         return action_idx, force_raw, spin_raw, log_prob, value
 
-    def evaluate_actions(self, obs_batch, action_idx, force_raw, spin_raw):
-        scores, f_means, s_means, safety_logit, value = self.forward(**obs_batch)
-        force_std = torch.exp(self.log_std[0])
-        spin_std = torch.exp(self.log_std[1])
+    def evaluate_actions(self, obs_batch, action_idx, force_raw, spin_raw,
+                         is_placement=None):
+        scores, f_means, s_means, safety_logit, value, pooled = self.forward(**obs_batch)
 
-        combined_logits = torch.cat([scores, safety_logit], dim=-1)
-        cat = Categorical(logits=combined_logits)
-        log_p_action = cat.log_prob(action_idx)
+        if is_placement is None:
+            is_placement = obs_batch['game_state'][:, 5] > 0.5
 
-        is_safety = (action_idx == MAX_SHOTS)
-        shot_idx = action_idx.clone()
-        shot_idx[is_safety] = 0
+        B = scores.shape[0]
+        device = scores.device
+        log_prob = torch.zeros(B, device=device)
+        entropy = torch.zeros(B, device=device)
 
-        f_mu = f_means.gather(1, shot_idx.unsqueeze(-1)).squeeze(-1)
-        s_mu = s_means.gather(1, shot_idx.unsqueeze(-1)).squeeze(-1)
-        f_mu[is_safety] = 0.0
-        s_mu[is_safety] = 0.0
+        p_mask = is_placement
+        s_mask = ~is_placement
 
-        force_dist = Normal(f_mu, force_std)
-        spin_dist = Normal(s_mu, spin_std)
+        if p_mask.any():
+            p_lp, p_ent = self._evaluate_placement(
+                pooled[p_mask], force_raw[p_mask], spin_raw[p_mask])
+            log_prob[p_mask] = p_lp
+            entropy[p_mask] = p_ent
 
-        log_prob = (log_p_action
-                    + force_dist.log_prob(force_raw)
-                    + spin_dist.log_prob(spin_raw))
-        entropy = cat.entropy() + force_dist.entropy() + spin_dist.entropy()
+        if s_mask.any():
+            force_std = torch.exp(self.log_std[0])
+            spin_std = torch.exp(self.log_std[1])
+
+            s_scores = scores[s_mask]
+            s_safety = safety_logit[s_mask]
+            combined_logits = torch.cat([s_scores, s_safety], dim=-1)
+            cat = Categorical(logits=combined_logits)
+            s_action_idx = action_idx[s_mask]
+            log_p_action = cat.log_prob(s_action_idx)
+
+            is_safety = (s_action_idx == MAX_SHOTS)
+            shot_idx = s_action_idx.clone()
+            shot_idx[is_safety] = 0
+
+            s_f_means = f_means[s_mask]
+            s_s_means = s_means[s_mask]
+            f_mu = s_f_means.gather(1, shot_idx.unsqueeze(-1)).squeeze(-1)
+            s_mu = s_s_means.gather(1, shot_idx.unsqueeze(-1)).squeeze(-1)
+            f_mu[is_safety] = 0.0
+            s_mu[is_safety] = 0.0
+
+            force_dist = Normal(f_mu, force_std)
+            spin_dist = Normal(s_mu, spin_std)
+
+            s_lp = (log_p_action
+                     + force_dist.log_prob(force_raw[s_mask])
+                     + spin_dist.log_prob(spin_raw[s_mask]))
+            s_ent = cat.entropy() + force_dist.entropy() + spin_dist.entropy()
+            log_prob[s_mask] = s_lp
+            entropy[s_mask] = s_ent
+
         return log_prob, entropy, value
 
 
@@ -292,3 +362,14 @@ if __name__ == '__main__':
     lp2, ent, v2 = net.evaluate_actions(obs, idx, f, s)
     print(f'eval log_prob close: {torch.allclose(lp, lp2, atol=1e-5)}')
     print(f'entropy: {[round(x, 3) for x in ent.tolist()]}')
+
+    # Test placement head
+    obs_plc = {k: v.clone() for k, v in obs.items()}
+    obs_plc['game_state'][:, 5] = 1.0  # BIH flag
+    obs_plc['shot_mask'][:] = False
+    idx_p, xn, yn, lp_p, v_p = net.get_action(obs_plc)
+    print(f'\nPlacement test (BIH):')
+    print(f'action_idx: {idx_p.tolist()} (should be -1)')
+    print(f'x_norm: {[round(x, 3) for x in xn.tolist()]}')
+    print(f'y_norm: {[round(x, 3) for x in yn.tolist()]}')
+    print(f'log_prob: {[round(x, 3) for x in lp_p.tolist()]}')

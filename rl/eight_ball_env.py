@@ -168,6 +168,7 @@ class EightBallEnv:
         self.groups = {0: None, 1: None}
         self.ball_in_hand = False
         self.ball_in_hand_behind_head = False
+        self.awaiting_placement = False
         self.winner = None
         self.total_shots = 0
         self.consecutive_fouls = [0, 0]
@@ -206,7 +207,8 @@ class EightBallEnv:
             self.current_player = 1
             self.ball_in_hand = True
             self.ball_in_hand_behind_head = True
-            self.cue = _place_ball_in_hand(self.balls, behind_head_string=True)
+            self.awaiting_placement = True
+            self.cue = [HEAD_STRING_X / 2, TABLE_WIDTH / 2]
         else:
             for bid in pocketed_ids:
                 if bid in self.balls:
@@ -315,14 +317,17 @@ class EightBallEnv:
         gs[3] = 1.0 if self._on_8ball() else 0.0
         gs[4] = 1.0 if self._on_8ball(1 - self.current_player) else 0.0
         gs[5] = 1.0 if self.ball_in_hand else 0.0
-        gs[6] = 1.0 if self.phase == BREAK else 0.0
+        gs[6] = 1.0 if self.ball_in_hand_behind_head else 0.0
         gs[7] = min(self.consecutive_fouls[self.current_player], 3) / 3.0
 
-        # Legal shots
-        legal = self.get_legal_shots()
-        legal = legal[:MAX_SHOTS]
+        # Legal shots (empty during placement)
         shots_arr = np.zeros((MAX_SHOTS, 9), dtype=np.float32)
         shot_mask = np.zeros(MAX_SHOTS, dtype=bool)
+        if self.awaiting_placement:
+            legal = []
+        else:
+            legal = self.get_legal_shots()
+            legal = legal[:MAX_SHOTS]
         for i, s in enumerate(legal):
             bx, by = self.balls[s.ball_id]
             pocket_pos = POCKETS[s.pocket_idx]
@@ -347,6 +352,8 @@ class EightBallEnv:
              record_trajectory: bool = False, traj_max_frames: int = 600):
         if self.phase == GAME_OVER:
             return self.get_obs(), 0.0, True, {'reason': 'already over'}
+        assert not self.awaiting_placement, \
+            "Must call step_placement() before step() when ball-in-hand"
 
         legal = obs.shot_meta
         is_safety = called_safety or (action_idx == len(legal))
@@ -555,11 +562,78 @@ class EightBallEnv:
         self.ball_in_hand = ball_in_hand
         self.ball_in_hand_behind_head = False
         if ball_in_hand:
-            target = self._my_ball_ids() or None
-            if self._on_8ball():
-                target = {8}
-            self.cue = _place_ball_in_hand(self.balls, behind_head_string=False,
-                                           target_ids=target)
+            self.awaiting_placement = True
+            self.cue = [TABLE_LENGTH / 2, TABLE_WIDTH / 2]
+
+    def step_placement(self, x_norm, y_norm):
+        """Execute BIH placement. x_norm, y_norm in [0, 1]."""
+        behind = self.ball_in_hand_behind_head
+        x_lo = R + 0.5
+        x_hi = (HEAD_STRING_X - 0.5) if behind else (TABLE_LENGTH - R - 0.5)
+        y_lo = R + 0.5
+        y_hi = TABLE_WIDTH - R - 0.5
+
+        x = x_lo + x_norm * (x_hi - x_lo)
+        y = y_lo + y_norm * (y_hi - y_lo)
+        x, y = self._nudge_placement(x, y)
+
+        self.cue = [x, y]
+        self.awaiting_placement = False
+        self.ball_in_hand = False
+        self.ball_in_hand_behind_head = False
+
+        reward = self._placement_reward(x, y)
+        info = {
+            'player': self.current_player,
+            'placement': (x, y),
+            'is_placement_step': True,
+        }
+        return self.get_obs(), reward, False, info
+
+    def _nudge_placement(self, x, y):
+        min_dist = 2.5 * R
+        behind = self.ball_in_hand_behind_head
+        x_lo = R + 0.5
+        x_hi = (HEAD_STRING_X - 0.5) if behind else (TABLE_LENGTH - R - 0.5)
+        y_lo = R + 0.5
+        y_hi = TABLE_WIDTH - R - 0.5
+
+        for _ in range(10):
+            overlap = False
+            for bx, by in self.balls.values():
+                dist = math.hypot(x - bx, y - by)
+                if dist < min_dist:
+                    overlap = True
+                    if dist < 0.01:
+                        angle = random.random() * 2 * math.pi
+                        x += math.cos(angle) * min_dist
+                        y += math.sin(angle) * min_dist
+                    else:
+                        needed = min_dist - dist + 0.1
+                        x += (x - bx) / dist * needed
+                        y += (y - by) / dist * needed
+                    x = max(x_lo, min(x_hi, x))
+                    y = max(y_lo, min(y_hi, y))
+                    break
+            if not overlap:
+                break
+        return x, y
+
+    def _placement_reward(self, x, y):
+        target_ids = self._my_ball_ids() or None
+        if self._on_8ball():
+            target_ids = {8}
+        shots = generate_legal_shots((x, y), self.balls, max_cut_deg=80.0)
+        if not shots:
+            return -0.15
+        if target_ids:
+            own = [s for s in shots if s.ball_id in target_ids]
+            if own:
+                easiest = min(own, key=lambda s: s.cut_angle_deg)
+                ease = max(0.0, 1.0 - easiest.cut_angle_deg / 90.0)
+                return 0.05 * ease + 0.01 * min(len(own), 5) / 5.0
+            return -0.05
+        return 0.02 * min(len(shots), 10) / 10.0
 
     def _handle_foul(self, reason, obs):
         self.consecutive_fouls[self.current_player] += 1
@@ -590,13 +664,23 @@ if __name__ == '__main__':
     # Play a full game with random actions
     total_reward = [0.0, 0.0]
     steps = 0
+    placements = 0
     while True:
+        if env.awaiting_placement:
+            player = env.current_player
+            obs, reward, done, info = env.step_placement(
+                random.random(), random.random())
+            total_reward[player] += reward
+            placements += 1
+            steps += 1
+            if done:
+                break
+            continue
         legal = obs.shot_meta
         if not legal:
-            # Safety (no legal shots)
             action_idx = 0
         else:
-            action_idx = random.randint(0, len(legal))  # includes safety
+            action_idx = random.randint(0, len(legal))
         force_raw = random.gauss(0, 1)
         spin_raw = random.gauss(0, 1)
         player = env.current_player
@@ -604,7 +688,7 @@ if __name__ == '__main__':
         total_reward[player] += reward
         steps += 1
         if done:
-            print(f'\nGame over after {steps} shots: {info.get("reason", "?")}')
+            print(f'\nGame over after {steps} steps ({placements} placements): {info.get("reason", "?")}')
             print(f'Winner: player {env.winner}')
             print(f'Groups: {env.groups}')
             print(f'Rewards: p0={total_reward[0]:.2f} p1={total_reward[1]:.2f}')
@@ -618,7 +702,13 @@ if __name__ == '__main__':
     for g in range(20):
         env2 = EightBallEnv()
         obs2 = env2.reset()
-        for _ in range(200):
+        for _ in range(300):
+            if env2.awaiting_placement:
+                obs2, r, d, info2 = env2.step_placement(
+                    random.random(), random.random())
+                if d:
+                    break
+                continue
             legal2 = obs2.shot_meta
             ai = random.randint(0, max(0, len(legal2)))
             obs2, r, d, info2 = env2.step(ai, random.gauss(0, 1), random.gauss(0, 1), obs2)

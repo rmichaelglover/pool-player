@@ -57,9 +57,10 @@ class EightBallBuffer:
         self.values = []
         self.advantages = []
         self.returns = []
+        self.is_placement = []
 
     def add(self, obs: EightBallObs, action_idx, force_raw, spin_raw,
-            reward, done, log_prob, value):
+            reward, done, log_prob, value, is_placement=False):
         self.balls.append(obs.balls)
         self.ball_mask.append(obs.ball_mask)
         self.ball_group.append(obs.ball_group)
@@ -74,6 +75,7 @@ class EightBallBuffer:
         self.dones.append(done)
         self.log_probs.append(log_prob)
         self.values.append(value)
+        self.is_placement.append(is_placement)
 
     def compute_returns(self, gamma=0.999, gae_lambda=0.95):
         n = len(self.rewards)
@@ -114,10 +116,11 @@ class EightBallBuffer:
             act_idx = torch.tensor([self.action_idx[i] for i in b], dtype=torch.long, device=device)
             f_raw = torch.tensor([self.force_raw[i] for i in b], dtype=torch.float32, device=device)
             s_raw = torch.tensor([self.spin_raw[i] for i in b], dtype=torch.float32, device=device)
+            is_plc = torch.tensor([self.is_placement[i] for i in b], dtype=torch.bool, device=device)
             old_lp = torch.tensor([self.log_probs[i] for i in b], dtype=torch.float32, device=device)
             ret = torch.tensor([self.returns[i] for i in b], dtype=torch.float32, device=device)
             adv_b = torch.tensor(adv[b], dtype=torch.float32, device=device)
-            yield obs, (act_idx, f_raw, s_raw), (old_lp, ret, adv_b)
+            yield obs, (act_idx, f_raw, s_raw, is_plc), (old_lp, ret, adv_b)
 
 
 # ── Vectorized env ─────────────────────────────────────────────────────────
@@ -145,6 +148,17 @@ class VecEightBall:
         self.last_obs[env_idx] = next_obs
         return next_obs, reward, done, info
 
+    def step_placement(self, env_idx, x_norm, y_norm):
+        env = self.envs[env_idx]
+        next_obs, reward, done, info = env.step_placement(
+            float(x_norm), float(y_norm))
+        if done:
+            info['final_winner'] = env.winner
+            info['final_shots'] = env.total_shots
+            next_obs = env.reset()
+        self.last_obs[env_idx] = next_obs
+        return next_obs, reward, done, info
+
 
 # ── Training loop ──────────────────────────────────────────────────────────
 
@@ -159,8 +173,10 @@ def train_eight_ball(num_envs=8, device_name='cpu', max_iters=1000,
                        num_layers=num_layers).to(device)
     if warm_start and os.path.exists(warm_start):
         state = torch.load(warm_start, map_location=device, weights_only=True)
-        net.load_state_dict(state)
+        missing, unexpected = net.load_state_dict(state, strict=False)
         print(f'Warm-started from {warm_start}', flush=True)
+        if missing:
+            print(f'  New parameters (default init): {missing}', flush=True)
     opt = torch.optim.Adam(net.parameters(), lr=lr, eps=1e-5)
     n_params = sum(p.numel() for p in net.parameters())
     print(f'8-ball self-play. EightBallNet {n_params:,} params on {device}', flush=True)
@@ -189,11 +205,13 @@ def train_eight_ball(num_envs=8, device_name='cpu', max_iters=1000,
 
         # Collect transitions
         total_steps = 0
+        iter_placements = 0
+        iter_placement_reward = 0.0
         while total_steps < steps_per_iter:
             for env_idx in range(num_envs):
                 obs = vec_env.last_obs[env_idx]
+                env = vec_env.envs[env_idx]
 
-                # Batch single obs for network
                 obs_batch = {
                     'balls': torch.from_numpy(obs.balls).unsqueeze(0).to(device),
                     'ball_mask': torch.from_numpy(obs.ball_mask).unsqueeze(0).to(device),
@@ -203,21 +221,32 @@ def train_eight_ball(num_envs=8, device_name='cpu', max_iters=1000,
                     'shots': torch.from_numpy(obs.shots).unsqueeze(0).to(device),
                     'shot_mask': torch.from_numpy(obs.shot_mask).unsqueeze(0).to(device),
                 }
-                with torch.no_grad():
-                    action_idx, force_raw, spin_raw, log_prob, value = net.get_action(obs_batch)
 
-                ai = action_idx.item()
-                fr = force_raw.item()
-                sr = spin_raw.item()
-                lp = log_prob.item()
-                val = value.item()
-
-                next_obs, reward, done, info = vec_env.step_single(env_idx, ai, fr, sr)
-                buffer.add(obs, ai, fr, sr, reward, done, lp, val)
+                if env.awaiting_placement:
+                    with torch.no_grad():
+                        action_idx, xn, yn, log_prob, value = net.get_action(obs_batch)
+                    lp = log_prob.item()
+                    val = value.item()
+                    next_obs, reward, done, info = vec_env.step_placement(
+                        env_idx, xn.item(), yn.item())
+                    buffer.add(obs, 0, xn.item(), yn.item(),
+                               reward, done, lp, val, is_placement=True)
+                    iter_placements += 1
+                    iter_placement_reward += reward
+                else:
+                    with torch.no_grad():
+                        action_idx, force_raw, spin_raw, log_prob, value = net.get_action(obs_batch)
+                    ai = action_idx.item()
+                    fr = force_raw.item()
+                    sr = spin_raw.item()
+                    lp = log_prob.item()
+                    val = value.item()
+                    next_obs, reward, done, info = vec_env.step_single(env_idx, ai, fr, sr)
+                    buffer.add(obs, ai, fr, sr, reward, done, lp, val, is_placement=False)
 
                 if 'foul' in info:
                     recent_fouls.append(1)
-                else:
+                elif not info.get('is_placement_step'):
                     recent_fouls.append(0)
 
                 if done:
@@ -243,10 +272,11 @@ def train_eight_ball(num_envs=8, device_name='cpu', max_iters=1000,
         n_updates = 0
         for epoch in range(ppo_epochs):
             for b_obs, b_act, b_trg in buffer.get_batches(batch_size, device):
-                act_idx, f_raw, s_raw = b_act
+                act_idx, f_raw, s_raw, is_plc = b_act
                 old_lp, b_ret, b_adv = b_trg
 
-                new_lp, entropy, values = net.evaluate_actions(b_obs, act_idx, f_raw, s_raw)
+                new_lp, entropy, values = net.evaluate_actions(
+                    b_obs, act_idx, f_raw, s_raw, is_placement=is_plc)
 
                 # Value loss: BCE since value is win probability in [0,1]
                 # and returns are shaped rewards (may be outside [0,1]),
@@ -266,6 +296,7 @@ def train_eight_ball(num_envs=8, device_name='cpu', max_iters=1000,
                 opt.step()
                 with torch.no_grad():
                     net.log_std.clamp_(min=log_std_min)
+                    net.placement_log_std.clamp_(min=log_std_min)
 
                 total_pg += pg_loss.item()
                 total_vl += v_loss.item()
@@ -282,9 +313,11 @@ def train_eight_ball(num_envs=8, device_name='cpu', max_iters=1000,
             vl = total_vl / max(1, n_updates)
             ent = total_ent / max(1, n_updates)
 
+            avg_plc_r = iter_placement_reward / max(1, iter_placements)
             print(f'Iter {iteration+1:5d} | Games={iter_games} '
                   f'W0={iter_wins[0]} W1={iter_wins[1]} D={iter_wins.get(None,0)} | '
-                  f'AvgLen={avg_len:5.1f} FoulRate={foul_rate:.2f} | '
+                  f'AvgLen={avg_len:5.1f} FoulRate={foul_rate:.2f} '
+                  f'Plc={iter_placements}({avg_plc_r:+.3f}) | '
                   f'PG={pg:.4f} VL={vl:.4f} Ent={ent:.3f} | {elapsed:.0f}s',
                   flush=True)
 
