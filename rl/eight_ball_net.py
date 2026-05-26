@@ -131,7 +131,7 @@ class EightBallNet(nn.Module):
         nn.init.orthogonal_(self.value_head[-1].weight, gain=1.0)
         nn.init.zeros_(self.value_head[-1].bias)
         nn.init.orthogonal_(self.safety_head.weight, gain=0.01)
-        nn.init.zeros_(self.safety_head.bias)
+        nn.init.constant_(self.safety_head.bias, -5.0)
 
     def forward(self, balls, ball_mask, ball_group, pockets,
                 game_state, shots, shot_mask):
