@@ -16,9 +16,10 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from table_geometry import (TABLE_LENGTH, TABLE_WIDTH, BALL_R as R,
-                              POCKETS, POCKET_NAMES,
+                              POCKETS, POCKET_NAMES, CUSHIONS, FACINGS,
                               CORNER_RAIL_OFFSET, SIDE_HALF, pocket_captures,
-                              optimal_pocket_aim)
+                              optimal_pocket_aim,
+                              _POCKET_FACING_PAIRS, _SIDE_POCKETS)
 
 # Backward-compat: some older callers expect a per-pocket radius (was used
 # only as a corner/side flag — corner if radius < 2.6). Geometry is no
@@ -31,26 +32,23 @@ POCKET_RADII = [2.5, 2.75, 2.5, 2.5, 2.75, 2.5]
 class LegalShot:
     ball_id: int
     pocket_idx: int
-    aim_point: tuple              # (x, y) — chosen aim point on cushion-back chord
-                                  # (NOT the pocket's nominal aim center —
-                                  # adjusted per-shot so the trajectory threads
-                                  # the cushion corridor with maximum clearance)
+    aim_point: tuple              # (x, y) — for direct: optimal cushion-back aim
+                                  # for bank: virtual (mirrored) pocket position
     ghost_pos: tuple              # (x, y) — where cue center must be at contact
     aim_angle: float              # radians, atan2(ghost_y - cue_y, ghost_x - cue_x)
     cut_angle_deg: float          # 0 = straight-in, 90 = impossible grazing
     cue_to_ghost_dist: float
-    ball_to_pocket_dist: float
+    ball_to_pocket_dist: float    # for bank: total path through reflection
+    is_bank: bool = False
+    rail_idx: int = -1            # CUSHIONS index (0-5), -1 for direct
+    reflection_point: tuple | None = None
 
     @property
     def difficulty(self) -> float:
-        """Rough difficulty metric — lower = easier.
-
-        Heuristic: product of cut-angle penalty and total distance.
-        Straight shots with short travel are easiest."""
-        # Cut angle factor: 1 at 0°, rises steeply past 45°
         cut_factor = 1.0 / max(0.1, math.cos(math.radians(self.cut_angle_deg)))
         total_dist = self.cue_to_ghost_dist + self.ball_to_pocket_dist
-        return cut_factor * (total_dist / 20.0)
+        base = cut_factor * (total_dist / 20.0)
+        return base * (1.8 if self.is_bank else 1.0)
 
 
 def ghost_ball(ball_pos, pocket_pos):
@@ -154,7 +152,156 @@ def _ghost_on_table(ghost_pos):
     return True
 
 
-def generate_legal_shots(cue_pos, balls, max_cut_deg=80.0, min_pocket_dist=1.0):
+def _bank_pocket_feasible(approach_pos, pocket_idx):
+    """Check if a ball approaching from approach_pos can enter the pocket.
+
+    Like optimal_pocket_aim but without the ghost-on-table constraint —
+    the ball is already in motion after a rail bounce."""
+    bx, by = approach_pos
+    fa_idx, fb_idx = _POCKET_FACING_PAIRS[pocket_idx]
+    fa = FACINGS[fa_idx]; fb = FACINGS[fb_idx]
+    if pocket_idx in _SIDE_POCKETS:
+        endpoints = ((fa[0], fa[1]), (fb[0], fb[1]), (fa[2], fa[3]), (fb[2], fb[3]))
+    else:
+        endpoints = ((fa[0], fa[1]), (fb[0], fb[1]))
+    px, py = POCKETS[pocket_idx]
+    dx, dy = px - bx, py - by
+    d_len = math.hypot(dx, dy)
+    if d_len < 1e-6:
+        return True
+    for ex, ey in endpoints:
+        perp_dist = abs(dy * (ex - bx) - dx * (ey - by)) / d_len
+        if perp_dist < R:
+            return False
+    return True
+
+
+def _mirror_pocket(pocket_pos, cushion):
+    """Mirror pocket position across a rail, offset by ball radius."""
+    x1, y1, x2, y2, nx, ny = cushion
+    px, py = pocket_pos
+    if abs(ny) > 0.5:
+        # Horizontal rail (top or bottom). Rail surface at y = y1.
+        # OB center bounces at y1 + ny*R (inward by R from cushion).
+        rail_y = y1 + ny * R
+        return (px, 2 * rail_y - py)
+    else:
+        # Vertical rail (left or right). Rail surface at x = x1.
+        rail_x = x1 + nx * R
+        return (2 * rail_x - px, py)
+
+
+def _bank_reflection_point(ball_pos, virtual_pocket, cushion, margin=2.0):
+    """Intersect ball→virtual_pocket line with the rail axis.
+
+    Returns (x, y) of the reflection point, or None if the intersection
+    is outside the valid cushion segment (with margin from endpoints)."""
+    x1, y1, x2, y2, nx, ny = cushion
+    bx, by = ball_pos
+    vx, vy = virtual_pocket
+    dx, dy = vx - bx, vy - by
+    if abs(dy) < 1e-9 and abs(dx) < 1e-9:
+        return None
+
+    if abs(ny) > 0.5:
+        # Horizontal rail at y = y1. OB center bounces at y1 + ny*R.
+        rail_y = y1 + ny * R
+        if abs(dy) < 1e-9:
+            return None
+        t = (rail_y - by) / dy
+        if t <= 0.0:
+            return None
+        rx = bx + t * dx
+        seg_min = min(x1, x2) + margin
+        seg_max = max(x1, x2) - margin
+        if rx < seg_min or rx > seg_max:
+            return None
+        return (rx, rail_y)
+    else:
+        # Vertical rail at x = x1. OB center bounces at x1 + nx*R.
+        rail_x = x1 + nx * R
+        if abs(dx) < 1e-9:
+            return None
+        t = (rail_x - bx) / dx
+        if t <= 0.0:
+            return None
+        ry = by + t * dy
+        seg_min = min(y1, y2) + margin
+        seg_max = max(y1, y2) - margin
+        if ry < seg_min or ry > seg_max:
+            return None
+        return (rail_x, ry)
+
+
+def generate_bank_shots(cue_pos, balls, max_cut_deg=70.0, min_pocket_dist=1.0):
+    """Enumerate all legal one-rail bank shots."""
+    shots = []
+    cue_t = tuple(cue_pos)
+    ball_map = {bid: tuple(pos) for bid, pos in balls.items()}
+
+    for ball_id, ball_pos in ball_map.items():
+        for p_idx, pocket_pos in enumerate(POCKETS):
+            if math.hypot(pocket_pos[0] - ball_pos[0],
+                          pocket_pos[1] - ball_pos[1]) < min_pocket_dist:
+                continue
+
+            for c_idx, cushion in enumerate(CUSHIONS):
+                virtual_pocket = _mirror_pocket(pocket_pos, cushion)
+
+                refl = _bank_reflection_point(ball_pos, virtual_pocket,
+                                              cushion)
+                if refl is None:
+                    continue
+
+                if not _bank_pocket_feasible(refl, p_idx):
+                    continue
+
+                ghost = ghost_ball(ball_pos, virtual_pocket)
+                if not _ghost_on_table(ghost):
+                    continue
+
+                bpx = ball_pos[0] - ghost[0]
+                bpy = ball_pos[1] - ghost[1]
+                cgx = ghost[0] - cue_t[0]
+                cgy = ghost[1] - cue_t[1]
+                if bpx * cgx + bpy * cgy <= 0:
+                    continue
+
+                cut = cut_angle_deg(cue_t, ghost, ball_pos, virtual_pocket)
+                if cut > max_cut_deg:
+                    continue
+
+                if _segment_blocked(cue_t, ghost, ball_map,
+                                    exclude_ids=[ball_id]):
+                    continue
+                if _segment_blocked(ball_pos, refl, ball_map,
+                                    exclude_ids=[ball_id]):
+                    continue
+                if _segment_blocked(refl, pocket_pos, ball_map,
+                                    exclude_ids=[ball_id]):
+                    continue
+
+                aim = math.atan2(ghost[1] - cue_t[1], ghost[0] - cue_t[0])
+                shots.append(LegalShot(
+                    ball_id=ball_id,
+                    pocket_idx=p_idx,
+                    aim_point=virtual_pocket,
+                    ghost_pos=ghost,
+                    aim_angle=aim,
+                    cut_angle_deg=cut,
+                    cue_to_ghost_dist=math.hypot(ghost[0] - cue_t[0],
+                                                  ghost[1] - cue_t[1]),
+                    ball_to_pocket_dist=math.hypot(virtual_pocket[0] - ball_pos[0],
+                                                    virtual_pocket[1] - ball_pos[1]),
+                    is_bank=True,
+                    rail_idx=c_idx,
+                    reflection_point=refl,
+                ))
+    return shots
+
+
+def generate_legal_shots(cue_pos, balls, max_cut_deg=80.0, min_pocket_dist=1.0,
+                         include_banks=False, bank_max_cut_deg=70.0):
     """
     Enumerate all legal direct shots for the given state.
 
@@ -248,6 +395,13 @@ def generate_legal_shots(cue_pos, balls, max_cut_deg=80.0, min_pocket_dist=1.0):
                 ball_to_pocket_dist=math.hypot(pocket_pos[0] - ball_pos[0],
                                                 pocket_pos[1] - ball_pos[1]),
             ))
+
+    if include_banks:
+        banks = generate_bank_shots(cue_pos, balls,
+                                     max_cut_deg=bank_max_cut_deg,
+                                     min_pocket_dist=min_pocket_dist)
+        shots.extend(banks)
+
     return shots
 
 
@@ -263,10 +417,17 @@ if __name__ == '__main__':
     cue = (15.0, 25.0)
     balls = {i + 1: (30.0 + i * 5, 20.0 + (i % 3) * 5) for i in range(5)}
     shots = generate_legal_shots(cue, balls)
-    print(f'{len(shots)} legal shots from cue={cue} with {len(balls)} balls:')
-    for s in sorted(shots, key=lambda s: s.difficulty)[:10]:
+    print(f'{len(shots)} direct shots from cue={cue} with {len(balls)} balls:')
+    for s in sorted(shots, key=lambda s: s.difficulty)[:5]:
         print(f'  ball {s.ball_id} → {POCKET_NAMES[s.pocket_idx]:6s} '
-              f'(cut={s.cut_angle_deg:5.1f}°  '
-              f'cue→ghost={s.cue_to_ghost_dist:5.1f}  '
-              f'ball→pocket={s.ball_to_pocket_dist:5.1f}  '
-              f'diff={s.difficulty:5.2f})')
+              f'(cut={s.cut_angle_deg:5.1f}°  diff={s.difficulty:5.2f})')
+
+    # Bank shot test
+    shots_with_banks = generate_legal_shots(cue, balls, include_banks=True)
+    banks = [s for s in shots_with_banks if s.is_bank]
+    print(f'\n{len(banks)} bank shots found:')
+    for s in sorted(banks, key=lambda s: s.difficulty)[:10]:
+        print(f'  ball {s.ball_id} → {POCKET_NAMES[s.pocket_idx]:6s} '
+              f'rail={s.rail_idx} refl=({s.reflection_point[0]:.1f},{s.reflection_point[1]:.1f}) '
+              f'(cut={s.cut_angle_deg:5.1f}°  diff={s.difficulty:5.2f})')
+    print(f'\nTotal: {len(shots_with_banks)} shots ({len(shots)} direct + {len(banks)} bank)')

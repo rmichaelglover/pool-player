@@ -203,7 +203,8 @@ class Phase7Env:
         self.rerack_count += 1
 
     def get_legal_shots(self) -> list[LegalShot]:
-        return generate_legal_shots(self.cue, self.balls, max_cut_deg=80.0)
+        return generate_legal_shots(self.cue, self.balls, max_cut_deg=80.0,
+                                      include_banks=True)
 
     def get_obs(self) -> Phase7Obs:
         balls_arr = np.full((MAX_BALLS, 2), -1.0, dtype=np.float32)
@@ -227,7 +228,7 @@ class Phase7Env:
 
         legal = self.get_legal_shots()
         legal = legal[:MAX_SHOTS]  # hard cap
-        shots_arr = np.zeros((MAX_SHOTS, 9), dtype=np.float32)
+        shots_arr = np.zeros((MAX_SHOTS, 10), dtype=np.float32)
         shot_mask = np.zeros(MAX_SHOTS, dtype=bool)
         for i, s in enumerate(legal):
             bx, by = self.balls[s.ball_id]
@@ -240,6 +241,7 @@ class Phase7Env:
                 s.cut_angle_deg / 90.0,
                 s.cue_to_ghost_dist / TABLE_LENGTH,
                 s.ball_to_pocket_dist / TABLE_LENGTH,
+                1.0 if s.is_bank else 0.0,
             ]
             shot_mask[i] = True
 
@@ -595,7 +597,8 @@ class Phase7Env:
         """
         if not self.balls:
             return 0.0
-        next_shots = generate_legal_shots(self.cue, self.balls, max_cut_deg=80.0)
+        next_shots = generate_legal_shots(self.cue, self.balls, max_cut_deg=80.0,
+                                              include_banks=True)
         if not next_shots:
             return -self.next_shape_bonus_max
         best_ease = 0.0
@@ -640,7 +643,7 @@ class Phase7Buffer:
         self.ball_mask = np.zeros((N, E, MAX_BALLS), dtype=bool)
         self.ball_is_cue = np.zeros((N, E, MAX_BALLS), dtype=np.float32)
         self.pockets = np.zeros((N, E, MAX_POCKETS, 3), dtype=np.float32)
-        self.shots = np.zeros((N, E, MAX_SHOTS, 9), dtype=np.float32)
+        self.shots = np.zeros((N, E, MAX_SHOTS, 10), dtype=np.float32)
         self.shot_mask = np.zeros((N, E, MAX_SHOTS), dtype=bool)
         self.shot_idx = np.zeros((N, E), dtype=np.int64)
         self.force_raw = np.zeros((N, E), dtype=np.float32)

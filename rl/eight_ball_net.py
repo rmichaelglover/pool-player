@@ -54,7 +54,7 @@ class EightBallObs:
     ball_group: np.ndarray     # (MAX_BALLS,)    — group encoding float
     pockets: np.ndarray        # (MAX_POCKETS, 3) — (x/TL, y/TW, is_corner)
     game_state: np.ndarray     # (GAME_STATE_DIM,) — global context features
-    shots: np.ndarray          # (MAX_SHOTS, 9)  — per-shot geometric features
+    shots: np.ndarray          # (MAX_SHOTS, 10) — per-shot features (9 geom + is_bank)
     shot_mask: np.ndarray      # (MAX_SHOTS,)    — True where shot is valid
     shot_meta: list            # list of LegalShot objects
 
@@ -83,7 +83,7 @@ class EightBallNet(nn.Module):
             nn.GELU(),
         )
         self.shot_encoder = nn.Sequential(
-            nn.Linear(9, embed_dim),
+            nn.Linear(10, embed_dim),
             nn.LayerNorm(embed_dim),
             nn.GELU(),
         )
@@ -347,7 +347,7 @@ if __name__ == '__main__':
     ball_group[:, 9:] = GROUP_THEIRS
     pockets = torch.randn(B, MAX_POCKETS, 3)
     game_state = torch.zeros(B, GAME_STATE_DIM)
-    shots = torch.randn(B, MAX_SHOTS, 9)
+    shots = torch.randn(B, MAX_SHOTS, 10)
     shot_mask = torch.ones(B, MAX_SHOTS, dtype=torch.bool)
     shot_mask[:, 10:] = False
     obs = dict(balls=balls, ball_mask=ball_mask, ball_group=ball_group,

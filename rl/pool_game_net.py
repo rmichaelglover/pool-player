@@ -64,7 +64,7 @@ class Phase7Obs:
     ball_mask: np.ndarray      # (MAX_BALLS,)    — 1 where token is valid (on table)
     ball_is_cue: np.ndarray    # (MAX_BALLS,)    — 1 for cue, 0 otherwise
     pockets: np.ndarray        # (MAX_POCKETS, 3) — (x/TL, y/TW, is_corner)
-    shots: np.ndarray          # (MAX_SHOTS, 9)  — per-shot features
+    shots: np.ndarray          # (MAX_SHOTS, 10)  — per-shot features
     shot_mask: np.ndarray      # (MAX_SHOTS,)    — 1 where shot is valid
     shot_meta: list            # list of LegalShot objects (for decode/debug)
 
@@ -90,7 +90,7 @@ class PoolGameNet(nn.Module):
             nn.GELU(),
         )
         self.shot_encoder = nn.Sequential(
-            nn.Linear(9, embed_dim),
+            nn.Linear(10, embed_dim),
             nn.LayerNorm(embed_dim),
             nn.GELU(),
         )
@@ -269,7 +269,7 @@ if __name__ == '__main__':
     ball_is_cue = torch.zeros(B, MAX_BALLS)
     ball_is_cue[:, 0] = 1.0
     pockets = torch.randn(B, MAX_POCKETS, 3)
-    shots = torch.randn(B, MAX_SHOTS, 9)
+    shots = torch.randn(B, MAX_SHOTS, 10)
     # Randomly set some shots invalid to test masking
     shot_mask = torch.ones(B, MAX_SHOTS, dtype=torch.bool)
     shot_mask[:, 10:] = False  # only first 10 valid

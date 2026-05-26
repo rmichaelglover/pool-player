@@ -254,24 +254,24 @@ class EightBallEnv:
         return self._my_remaining(player) == 0 and self.groups[player] is not None
 
     def get_legal_shots(self):
-        all_shots = generate_legal_shots(self.cue, self.balls, max_cut_deg=80.0)
+        all_shots = generate_legal_shots(self.cue, self.balls, max_cut_deg=80.0,
+                                          include_banks=True)
         if self.phase == OPEN_TABLE:
             return [s for s in all_shots if s.ball_id != 8]
 
-        # PLAYING phase: only own group (or 8-ball if on 8).
-        # If no own-group shots at 80°, widen to 89° to find steep-angle
-        # shots — a real player would still aim at their own ball.
         if self._on_8ball():
             eight_shots = [s for s in all_shots if s.ball_id == 8]
             if eight_shots:
                 return eight_shots
-            wide = generate_legal_shots(self.cue, self.balls, max_cut_deg=89.0)
+            wide = generate_legal_shots(self.cue, self.balls, max_cut_deg=89.0,
+                                         include_banks=True)
             return [s for s in wide if s.ball_id == 8]
         my_ids = self._my_ball_ids()
         own_shots = [s for s in all_shots if s.ball_id in my_ids]
         if own_shots:
             return own_shots
-        wide = generate_legal_shots(self.cue, self.balls, max_cut_deg=89.0)
+        wide = generate_legal_shots(self.cue, self.balls, max_cut_deg=89.0,
+                                     include_banks=True)
         return [s for s in wide if s.ball_id in my_ids]
 
     def get_obs(self) -> EightBallObs:
@@ -321,7 +321,7 @@ class EightBallEnv:
         gs[7] = min(self.consecutive_fouls[self.current_player], 3) / 3.0
 
         # Legal shots (empty during placement)
-        shots_arr = np.zeros((MAX_SHOTS, 9), dtype=np.float32)
+        shots_arr = np.zeros((MAX_SHOTS, 10), dtype=np.float32)
         shot_mask = np.zeros(MAX_SHOTS, dtype=bool)
         if self.awaiting_placement:
             legal = []
@@ -338,6 +338,7 @@ class EightBallEnv:
                 s.cut_angle_deg / 90.0,
                 s.cue_to_ghost_dist / TABLE_LENGTH,
                 s.ball_to_pocket_dist / TABLE_LENGTH,
+                1.0 if s.is_bank else 0.0,
             ]
             shot_mask[i] = True
 
@@ -623,7 +624,8 @@ class EightBallEnv:
         target_ids = self._my_ball_ids() or None
         if self._on_8ball():
             target_ids = {8}
-        shots = generate_legal_shots((x, y), self.balls, max_cut_deg=80.0)
+        shots = generate_legal_shots((x, y), self.balls, max_cut_deg=80.0,
+                                      include_banks=True)
         if not shots:
             return -0.15
         if target_ids:
