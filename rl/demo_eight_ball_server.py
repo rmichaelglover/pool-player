@@ -137,20 +137,17 @@ def handle_next_shot(payload):
 
     batch = obs_to_batch(obs, _device)
     with torch.no_grad():
-        action_idx, force_raw, spin_raw, _, value = _net.get_action(
-            batch, deterministic=True)
+        scores, f_means, s_means, _, value = _net.forward(**batch)
 
-    action_idx_val = action_idx.item()
-    force_raw_val = force_raw.item()
-    spin_raw_val = spin_raw.item()
+    # Pick best real shot — bypass safety logit (v1 net hasn't learned
+    # meaningful safety play, so safety always wins argmax and every
+    # shot would pass the turn even when pocketing own balls).
+    n_legal = len(obs.shot_meta)
+    action_idx_val = int(scores[0, :n_legal].argmax().item())
+    force_raw_val = float(f_means[0, action_idx_val].item())
+    spin_raw_val = float(s_means[0, action_idx_val].item())
 
-    is_safety = action_idx_val >= len(obs.shot_meta)
-    if is_safety and obs.shot_meta:
-        shot = obs.shot_meta[0]
-    elif action_idx_val < len(obs.shot_meta):
-        shot = obs.shot_meta[action_idx_val]
-    else:
-        shot = None
+    shot = obs.shot_meta[action_idx_val]
 
     obs_next, reward, done, info = env.step(
         action_idx_val, force_raw_val, spin_raw_val, obs,
@@ -168,8 +165,8 @@ def handle_next_shot(payload):
         'foul': info.get('foul'),
         'is_safety': info.get('is_safety', False),
         'player': player,
-        'called_id': shot.ball_id if shot else None,
-        'called_pocket': shot.pocket_idx if shot else -1,
+        'called_id': shot.ball_id,
+        'called_pocket': shot.pocket_idx,
         'aim_deg': aim_deg,
         'force': info.get('force', 0),
         'spin_factor': info.get('spin', 0),
