@@ -298,7 +298,7 @@
 </head>
 <body>
   <h1>8-Ball Pool RL Architecture</h1>
-  <p class="subtitle">Self-play PPO with transformer policy &middot; 585K params &middot; v3 (learned BIH placement)</p>
+  <p class="subtitle">Self-play PPO with transformer policy &middot; 585K params &middot; v3 (learned BIH + bank shots)</p>
 
   <div class="diagram">
 
@@ -322,12 +322,14 @@
           Rail-bounce, 3-body constraints
         </div>
       </div>
-      <div class="box env" style="min-width:200px;">
+      <div class="box env" style="min-width:240px;">
         <div class="label">shot_enumerator</div>
         <div class="detail">
           Ghost-ball geometry<br>
-          Cut angle &le;80&deg; (89&deg; fallback)<br>
-          Up to 60 legal shots
+          <strong>Direct:</strong> cut &le;80&deg; (89&deg; fallback)<br>
+          <strong>Bank:</strong> mirror pocket across rail,<br>
+          &nbsp;cut &le;70&deg;, 1.8&times; difficulty penalty<br>
+          Up to 60 shots (direct + bank)
         </div>
       </div>
     </div>
@@ -370,9 +372,9 @@
       <div class="box obs">
         <div class="label">Legal Shots</div>
         <div class="detail">
-          <code>(60, 9)</code> per-shot features<br>
+          <code>(60, 10)</code> per-shot features<br>
           ghost pos, ball pos, pocket pos<br>
-          cut angle, distances<br>
+          cut angle, distances, <strong>is_bank</strong><br>
           <em>zeroed during placement</em>
         </div>
       </div>
@@ -409,7 +411,7 @@
           </div>
           <div class="tf-token" style="border-color:#2d6886;">
             <div class="tok-label">Shot Encoder</div>
-            <div class="tok-dim">(9 feats) &rarr; 128d</div>
+            <div class="tok-dim">(10 feats) &rarr; 128d</div>
             <div class="tok-dim">Linear + LN + GELU</div>
           </div>
         </div>
