@@ -240,11 +240,17 @@ class EightBallEnv:
         if self.phase == OPEN_TABLE:
             return [s for s in all_shots if s.ball_id != 8]
 
-        # PLAYING phase: filter to own group (or 8-ball if on 8)
+        # PLAYING phase: prefer own group (or 8-ball if on 8).
+        # Fall back to any non-8 shot when own-group shots are empty —
+        # a real player would still shoot rather than auto-foul.
         if self._on_8ball():
-            return [s for s in all_shots if s.ball_id == 8]
+            eight_shots = [s for s in all_shots if s.ball_id == 8]
+            return eight_shots if eight_shots else all_shots
         my_ids = self._my_ball_ids()
-        return [s for s in all_shots if s.ball_id in my_ids]
+        own_shots = [s for s in all_shots if s.ball_id in my_ids]
+        if own_shots:
+            return own_shots
+        return [s for s in all_shots if s.ball_id != 8] or all_shots
 
     def get_obs(self) -> EightBallObs:
         balls_arr = np.full((MAX_BALLS, 2), -1.0, dtype=np.float32)
