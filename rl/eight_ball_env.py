@@ -102,19 +102,22 @@ def sample_eight_ball_rack():
     return cue, balls
 
 
-def _place_ball_in_hand(balls, behind_head_string=False):
-    """Find a good ball-in-hand placement by sampling candidates."""
-    best_pos = None
-    best_count = -1
+def _place_ball_in_hand(balls, behind_head_string=False, target_ids=None):
+    """Find a ball-in-hand placement that gives the easiest shot on a
+    target-group ball.  Scores candidates by the best (lowest) shot
+    difficulty among target balls, preferring straight-in short shots.
+    Falls back to maximizing total shot count if no target group."""
     x_lo = R + 0.5
     x_hi = HEAD_STRING_X - 0.5 if behind_head_string else TABLE_LENGTH - R - 0.5
     y_lo = R + 0.5
     y_hi = TABLE_WIDTH - R - 0.5
 
-    for _ in range(50):
+    best_pos = None
+    best_score = -1e9
+
+    for _ in range(80):
         cx = x_lo + random.random() * (x_hi - x_lo)
         cy = y_lo + random.random() * (y_hi - y_lo)
-        # Check no overlap with existing balls
         overlap = False
         for bx, by in balls.values():
             if math.hypot(cx - bx, cy - by) < 2.5 * R:
@@ -123,8 +126,21 @@ def _place_ball_in_hand(balls, behind_head_string=False):
         if overlap:
             continue
         shots = generate_legal_shots((cx, cy), balls, max_cut_deg=80.0)
-        if len(shots) > best_count:
-            best_count = len(shots)
+        if not shots:
+            continue
+
+        if target_ids:
+            own = [s for s in shots if s.ball_id in target_ids]
+            if own:
+                easiest = min(own, key=lambda s: s.cut_angle_deg)
+                score = (90.0 - easiest.cut_angle_deg) + len(own) * 0.1
+            else:
+                score = -100.0 + len(shots) * 0.01
+        else:
+            score = len(shots)
+
+        if score > best_score:
+            best_score = score
             best_pos = [cx, cy]
 
     if best_pos is None:
@@ -539,7 +555,11 @@ class EightBallEnv:
         self.ball_in_hand = ball_in_hand
         self.ball_in_hand_behind_head = False
         if ball_in_hand:
-            self.cue = _place_ball_in_hand(self.balls, behind_head_string=False)
+            target = self._my_ball_ids() or None
+            if self._on_8ball():
+                target = {8}
+            self.cue = _place_ball_in_hand(self.balls, behind_head_string=False,
+                                           target_ids=target)
 
     def _handle_foul(self, reason, obs):
         self.consecutive_fouls[self.current_player] += 1
