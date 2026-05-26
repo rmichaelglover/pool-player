@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>8-Ball RL Architecture</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: #0f1419;
+    color: #e8e6e3;
+    padding: 40px;
+    min-height: 100vh;
+  }
+  h1 {
+    text-align: center;
+    font-size: 28px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: #fff;
+  }
+  .subtitle {
+    text-align: center;
+    font-size: 14px;
+    color: #8899a6;
+    margin-bottom: 40px;
+  }
+  .diagram {
+    max-width: 1200px;
+    margin: 0 auto;
+    position: relative;
+  }
+
+  /* Sections */
+  .section {
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 20px;
+    margin-bottom: 12px;
+    position: relative;
+  }
+  .section.tight { margin-bottom: 6px; }
+
+  /* Boxes */
+  .box {
+    border-radius: 10px;
+    padding: 16px 20px;
+    text-align: center;
+    position: relative;
+    min-width: 160px;
+  }
+  .box .label {
+    font-weight: 600;
+    font-size: 15px;
+    margin-bottom: 6px;
+  }
+  .box .detail {
+    font-size: 12px;
+    opacity: 0.75;
+    line-height: 1.5;
+  }
+  .box .detail code {
+    background: rgba(255,255,255,0.08);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+
+  /* Color themes */
+  .env {
+    background: linear-gradient(135deg, #1a3a2a, #1e4d35);
+    border: 1.5px solid #2d8659;
+  }
+  .obs {
+    background: linear-gradient(135deg, #1a2a3a, #1e354d);
+    border: 1.5px solid #2d6886;
+  }
+  .net {
+    background: linear-gradient(135deg, #2a1a3a, #3d1e4d);
+    border: 1.5px solid #7a2d86;
+  }
+  .head {
+    background: linear-gradient(135deg, #3a1a2a, #4d1e35);
+    border: 1.5px solid #86432d;
+  }
+  .train {
+    background: linear-gradient(135deg, #3a2a1a, #4d3d1e);
+    border: 1.5px solid #86762d;
+  }
+  .action {
+    background: linear-gradient(135deg, #1a2a2a, #1e3d3d);
+    border: 1.5px solid #2d7a7a;
+  }
+  .sim {
+    background: linear-gradient(135deg, #1a3a2a, #1e4d35);
+    border: 1.5px solid #2d8659;
+  }
+
+  /* Arrows */
+  .arrow-down {
+    display: flex;
+    justify-content: center;
+    margin: 6px 0;
+  }
+  .arrow-down svg { display: block; }
+
+  /* Transformer detail box */
+  .transformer-detail {
+    background: linear-gradient(135deg, #2a1a3a, #3d1e4d);
+    border: 1.5px solid #7a2d86;
+    border-radius: 12px;
+    padding: 20px 28px;
+    max-width: 720px;
+    margin: 0 auto;
+  }
+  .transformer-detail .label {
+    font-weight: 600;
+    font-size: 16px;
+    text-align: center;
+    margin-bottom: 14px;
+  }
+  .tf-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+  }
+  .tf-row {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+  .tf-token {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 12px;
+    text-align: center;
+    min-width: 100px;
+  }
+  .tf-token .tok-label {
+    font-weight: 600;
+    font-size: 13px;
+    margin-bottom: 3px;
+  }
+  .tf-token .tok-dim {
+    font-size: 11px;
+    opacity: 0.6;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+  .tf-block {
+    background: rgba(122, 45, 134, 0.25);
+    border: 1px solid rgba(122, 45, 134, 0.5);
+    border-radius: 8px;
+    padding: 10px 24px;
+    font-size: 13px;
+    font-weight: 600;
+    text-align: center;
+  }
+  .tf-block .tok-dim {
+    font-size: 11px;
+    font-weight: 400;
+    opacity: 0.6;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+
+  /* Split outputs */
+  .split-container {
+    display: flex;
+    gap: 16px;
+    justify-content: center;
+    align-items: flex-start;
+    max-width: 900px;
+    margin: 0 auto;
+  }
+  .split-box {
+    flex: 1;
+    border-radius: 10px;
+    padding: 14px 18px;
+    text-align: center;
+  }
+  .split-box .label { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+  .split-box .detail { font-size: 11px; opacity: 0.75; line-height: 1.5; }
+
+  /* Loop arrow */
+  .loop-container {
+    position: relative;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  .loop-arrow {
+    position: absolute;
+    right: -60px;
+    top: 0;
+    height: 100%;
+    width: 60px;
+  }
+
+  /* Big section labels */
+  .section-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: #556;
+    text-align: center;
+    margin: 24px 0 10px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    justify-content: center;
+  }
+  .section-label::before,
+  .section-label::after {
+    content: '';
+    flex: 1;
+    max-width: 120px;
+    height: 1px;
+    background: #333;
+  }
+
+  /* Reward/foul detail */
+  .detail-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px 16px;
+    font-size: 11px;
+    text-align: left;
+    margin-top: 6px;
+  }
+  .detail-grid .dg-item {
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+  }
+  .dg-val {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .dg-pos { color: #5cb85c; }
+  .dg-neg { color: #d9534f; }
+
+  /* Connector lines (pure CSS) */
+  .connector {
+    display: flex;
+    justify-content: center;
+    height: 20px;
+    position: relative;
+  }
+  .connector::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    width: 2px;
+    height: 100%;
+    background: linear-gradient(to bottom, rgba(255,255,255,0.15), rgba(255,255,255,0.25));
+  }
+
+  /* PPO box */
+  .ppo-detail {
+    display: flex;
+    gap: 24px;
+    justify-content: center;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .ppo-param {
+    font-size: 11px;
+    opacity: 0.7;
+  }
+  .ppo-param strong {
+    opacity: 1;
+    color: #c9a227;
+  }
+
+  /* Self-play loop indicator */
+  .loop-indicator {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin: 20px 0 10px;
+    font-size: 12px;
+    color: #8899a6;
+  }
+  .loop-indicator .loop-icon {
+    width: 24px;
+    height: 24px;
+  }
+</style>
+</head>
+<body>
+  <h1>8-Ball Pool RL Architecture</h1>
+  <p class="subtitle">Self-play PPO with transformer policy &middot; 585K params &middot; v3 (learned BIH placement)</p>
+
+  <div class="diagram">
+
+    <!-- ═══════════════ ENVIRONMENT ═══════════════ -->
+    <div class="section-label">Environment</div>
+
+    <div class="section">
+      <div class="box env" style="min-width:280px;">
+        <div class="label">EightBallEnv</div>
+        <div class="detail">
+          Full APA/BCA 8-ball rules<br>
+          Auto-break &rarr; Open Table &rarr; Playing &rarr; Game Over<br>
+          <code>16 envs</code> &times; <code>32 steps/iter</code>
+        </div>
+      </div>
+      <div class="box sim" style="min-width:200px;">
+        <div class="label">pool_sim</div>
+        <div class="detail">
+          C-backed physics simulation<br>
+          Continuous spin, friction, restitution<br>
+          Rail-bounce, 3-body constraints
+        </div>
+      </div>
+      <div class="box env" style="min-width:200px;">
+        <div class="label">shot_enumerator</div>
+        <div class="detail">
+          Ghost-ball geometry<br>
+          Cut angle &le;80&deg; (89&deg; fallback)<br>
+          Up to 60 legal shots
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow-down">
+      <svg width="24" height="28" viewBox="0 0 24 28">
+        <path d="M12 2 L12 20 M6 16 L12 24 L18 16" stroke="#4a8" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+
+    <!-- ═══════════════ OBSERVATION ═══════════════ -->
+    <div class="section-label">Observation</div>
+
+    <div class="section">
+      <div class="box obs">
+        <div class="label">Balls</div>
+        <div class="detail">
+          <code>(16, 2)</code> normalized xy<br>
+          mask + group float<br>
+          0.0=cue 0.33=mine<br>
+          0.67=theirs 1.0=8ball
+        </div>
+      </div>
+      <div class="box obs">
+        <div class="label">Pockets</div>
+        <div class="detail">
+          <code>(6, 3)</code><br>
+          (x, y, is_corner)
+        </div>
+      </div>
+      <div class="box obs">
+        <div class="label">Game State</div>
+        <div class="detail">
+          <code>(8,)</code> context vector<br>
+          my/their remaining<br>
+          open table, on-8, BIH<br>
+          behind head string, fouls
+        </div>
+      </div>
+      <div class="box obs">
+        <div class="label">Legal Shots</div>
+        <div class="detail">
+          <code>(60, 9)</code> per-shot features<br>
+          ghost pos, ball pos, pocket pos<br>
+          cut angle, distances<br>
+          <em>zeroed during placement</em>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow-down">
+      <svg width="24" height="28" viewBox="0 0 24 28">
+        <path d="M12 2 L12 20 M6 16 L12 24 L18 16" stroke="#468" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+
+    <!-- ═══════════════ NETWORK ═══════════════ -->
+    <div class="section-label">EightBallNet (Transformer)</div>
+
+    <div class="transformer-detail">
+      <div class="tf-inner">
+
+        <!-- Encoders -->
+        <div class="tf-row">
+          <div class="tf-token" style="border-color:#2d6886;">
+            <div class="tok-label">Ball Encoder</div>
+            <div class="tok-dim">(x,y,group) &rarr; 128d</div>
+            <div class="tok-dim">Linear + LN + GELU</div>
+          </div>
+          <div class="tf-token" style="border-color:#2d6886;">
+            <div class="tok-label">Pocket Encoder</div>
+            <div class="tok-dim">(x,y,corner) &rarr; 128d</div>
+            <div class="tok-dim">Linear + LN + GELU</div>
+          </div>
+          <div class="tf-token" style="border-color:#2d6886;">
+            <div class="tok-label">Game State Enc</div>
+            <div class="tok-dim">(8 feats) &rarr; 128d</div>
+            <div class="tok-dim">Linear + LN + GELU</div>
+          </div>
+          <div class="tf-token" style="border-color:#2d6886;">
+            <div class="tok-label">Shot Encoder</div>
+            <div class="tok-dim">(9 feats) &rarr; 128d</div>
+            <div class="tok-dim">Linear + LN + GELU</div>
+          </div>
+        </div>
+
+        <div style="font-size:11px; opacity:0.5; margin: 2px 0;">+ Type Embeddings (4 types &times; 128d)</div>
+
+        <svg width="24" height="18" viewBox="0 0 24 18">
+          <path d="M12 2 L12 12 M8 9 L12 16 L16 9" stroke="#7a2d86" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+
+        <!-- Token sequence -->
+        <div class="tf-block" style="width:100%;">
+          Token Sequence: 16 ball + 6 pocket + 1 game_state + 60 shot = <strong>83 tokens</strong>
+          <br><div class="tok-dim">padding mask hides absent balls &amp; invalid shots</div>
+        </div>
+
+        <svg width="24" height="18" viewBox="0 0 24 18">
+          <path d="M12 2 L12 12 M8 9 L12 16 L16 9" stroke="#7a2d86" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+
+        <!-- Transformer -->
+        <div class="tf-block" style="background:rgba(122,45,134,0.4); border-color:rgba(122,45,134,0.7);">
+          TransformerEncoder &times; 4 layers
+          <br><div class="tok-dim">8 heads &middot; 128d &middot; 256 FFN &middot; pre-norm &middot; GELU &middot; no dropout</div>
+        </div>
+
+        <svg width="24" height="18" viewBox="0 0 24 18">
+          <path d="M12 2 L12 12 M8 9 L12 16 L16 9" stroke="#7a2d86" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+
+        <!-- Split -->
+        <div style="display:flex; gap:8px; align-items:center; font-size:12px; opacity:0.6;">
+          <span>split at token 23</span>
+          <svg width="60" height="12" viewBox="0 0 60 12">
+            <path d="M5 6 L25 6 M25 6 L25 2 L55 2 M25 6 L25 10 L55 10" stroke="#888" stroke-width="1.2" fill="none" stroke-linecap="round"/>
+          </svg>
+        </div>
+
+        <div style="display:flex; gap:16px; width:100%;">
+          <div class="tf-token" style="flex:1; border-color:#86432d;">
+            <div class="tok-label">Non-shot tokens</div>
+            <div class="tok-dim">16 ball + 6 pocket + 1 gs = 23</div>
+            <div class="tok-dim">mean-pool (valid only) &rarr; 128d</div>
+          </div>
+          <div class="tf-token" style="flex:1; border-color:#86432d;">
+            <div class="tok-label">Shot tokens</div>
+            <div class="tok-dim">up to 60 encoded shots</div>
+            <div class="tok-dim">per-token output &rarr; 128d each</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow-down">
+      <svg width="24" height="28" viewBox="0 0 24 28">
+        <path d="M12 2 L12 20 M6 16 L12 24 L18 16" stroke="#86432d" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+
+    <!-- ═══════════════ OUTPUT HEADS ═══════════════ -->
+    <div class="section-label">Output Heads</div>
+
+    <div class="split-container" style="max-width:1000px;">
+      <div class="split-box head">
+        <div class="label">Shot Head</div>
+        <div class="detail">
+          Per-shot: <code>128 &rarr; 128 &rarr; 3</code><br>
+          (score logit, force_&mu;, spin_&mu;)<br>
+          Masked softmax over valid shots
+        </div>
+      </div>
+      <div class="split-box head">
+        <div class="label">Safety Head</div>
+        <div class="detail">
+          From pooled: <code>128 &rarr; 1</code><br>
+          Logit #61 appended to shots<br>
+          <strong>Bias init: -5.0</strong>
+        </div>
+      </div>
+      <div class="split-box" style="background: linear-gradient(135deg, #1a2a3a, #1e3a4d); border: 1.5px solid #2d7a86; border-radius: 10px;">
+        <div class="label" style="color:#5bc0de;">Placement Head</div>
+        <div class="detail">
+          From pooled: <code>128 &rarr; 128 &rarr; 2</code><br>
+          Sigmoid &rarr; (x, y) in [0, 1]<br>
+          <strong>Active when gs[5]=BIH</strong>
+        </div>
+      </div>
+      <div class="split-box head">
+        <div class="label">Value Head</div>
+        <div class="detail">
+          From pooled: <code>128 &rarr; 128 &rarr; 1</code><br>
+          Sigmoid &rarr; win prob [0, 1]<br>
+          BCE loss
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow-down">
+      <svg width="24" height="28" viewBox="0 0 24 28">
+        <path d="M12 2 L12 20 M6 16 L12 24 L18 16" stroke="#2d7a7a" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+
+    <!-- ═══════════════ ACTION ═══════════════ -->
+    <div class="section-label">Action Sampling (branched on game state)</div>
+
+    <div class="section" style="gap:16px;">
+      <div class="box action" style="min-width:340px;">
+        <div class="label">Shot Action</div>
+        <div class="detail">
+          <strong>When:</strong> normal turn (gs[5]=0)<br>
+          <strong>Discrete:</strong> Categorical over 60 shots + 1 safety<br>
+          <strong>Continuous:</strong> Normal(&mu;, &sigma;) for force &amp; spin<br>
+          <code>force = 50 + 200&middot;&sigma;(raw)</code> <code>spin = 1.5&middot;tanh(raw)</code>
+        </div>
+      </div>
+      <div class="box" style="min-width:320px; background: linear-gradient(135deg, #1a2a3a, #1e3a4d); border: 1.5px solid #2d7a86; border-radius: 10px;">
+        <div class="label" style="color:#5bc0de;">Placement Action</div>
+        <div class="detail">
+          <strong>When:</strong> ball-in-hand (gs[5]=1)<br>
+          <strong>Continuous:</strong> Normal(&mu;, &sigma;) for x &amp; y in [0, 1]<br>
+          Env denormalizes to table bounds, nudges overlaps<br>
+          Behind-head-string: x clamped to kitchen
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow-down">
+      <svg width="24" height="28" viewBox="0 0 24 28">
+        <path d="M12 2 L12 20 M6 16 L12 24 L18 16" stroke="#2d8659" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+
+    <!-- ═══════════════ STEP + REWARD ═══════════════ -->
+    <div class="section-label">Step &amp; Reward</div>
+
+    <div class="section">
+      <div class="box sim" style="min-width:240px;">
+        <div class="label">Shot Step</div>
+        <div class="detail" style="text-align:left;">
+          1. Decode force/spin, apply noise<br>
+          2. Simulate shot (pool_sim)<br>
+          3. Check 8-ball loss conditions<br>
+          4. Detect fouls (scratch, wrong ball,<br>
+          &nbsp;&nbsp;&nbsp;no contact, no rail)<br>
+          5. Remove pocketed, update positions<br>
+          6. Assign groups if open table<br>
+          7. Switch player or continue<br>
+          &nbsp;&nbsp;&nbsp;<em>Foul &rarr; awaiting_placement</em>
+        </div>
+      </div>
+      <div class="box" style="min-width:200px; background: linear-gradient(135deg, #1a2a3a, #1e3a4d); border: 1.5px solid #2d7a86; border-radius: 10px;">
+        <div class="label" style="color:#5bc0de;">Placement Step</div>
+        <div class="detail" style="text-align:left;">
+          1. Denormalize (x, y) to table<br>
+          2. Nudge away from ball overlaps<br>
+          3. Clamp to valid region<br>
+          4. Place cue ball<br>
+          5. Compute placement reward<br>
+          6. Return obs for shot selection<br>
+          <em>BIH turn = 2 steps total</em>
+        </div>
+      </div>
+      <div class="box train" style="min-width:300px;">
+        <div class="label">Reward Signal</div>
+        <div class="detail-grid">
+          <div class="dg-item"><span class="dg-val dg-pos">+0.15</span> per own ball pocketed</div>
+          <div class="dg-item"><span class="dg-val dg-neg">-0.15</span> per opponent ball pocketed</div>
+          <div class="dg-item"><span class="dg-val dg-pos">+0.10</span> cleared all own group</div>
+          <div class="dg-item"><span class="dg-val dg-neg">-0.40</span> any foul</div>
+          <div class="dg-item"><span class="dg-val dg-pos">+1.0</span> win (legal 8-ball pocket)</div>
+          <div class="dg-item"><span class="dg-val dg-neg">-1.0</span> loss (8-ball violation)</div>
+          <div class="dg-item" style="grid-column: span 2;"><span class="dg-val" style="color:#c9a227;">&plusmn;0.05</span> shape bonus (ease of next shot)</div>
+          <div class="dg-item" style="grid-column: span 2;"><span class="dg-val" style="color:#5bc0de;">&plusmn;0.06</span> placement shaping (shot ease)</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow-down">
+      <svg width="24" height="28" viewBox="0 0 24 28">
+        <path d="M12 2 L12 20 M6 16 L12 24 L18 16" stroke="#86762d" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+
+    <!-- ═══════════════ PPO TRAINING ═══════════════ -->
+    <div class="section-label">PPO Training</div>
+
+    <div class="section">
+      <div class="box train" style="min-width:640px;">
+        <div class="label">PPO Update</div>
+        <div class="detail">
+          Both players share one network &mdash; self-play feeds both sides into the same buffer<br>
+          GAE(&lambda;=0.95, &gamma;=0.999) per-player within each game
+        </div>
+        <div class="ppo-detail">
+          <span class="ppo-param"><strong>4</strong> PPO epochs</span>
+          <span class="ppo-param"><strong>256</strong> batch size</span>
+          <span class="ppo-param"><strong>0.2</strong> clip &epsilon;</span>
+          <span class="ppo-param"><strong>1e-4</strong> lr (Adam)</span>
+          <span class="ppo-param"><strong>0.5</strong> value coef</span>
+          <span class="ppo-param"><strong>0.01</strong> entropy coef</span>
+          <span class="ppo-param"><strong>0.5</strong> grad clip</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Loop arrow -->
+    <div class="loop-indicator">
+      <svg class="loop-icon" viewBox="0 0 24 24" fill="none" stroke="#8899a6" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M1 4v6h6"/>
+        <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+      </svg>
+      Self-play loop: collect 32 steps &times; 16 envs &rarr; PPO update &rarr; repeat &times; 1500 iters
+    </div>
+
+  </div>
+</body>
+</html>
