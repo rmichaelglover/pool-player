@@ -8,12 +8,11 @@ __pycache__/
 *.o
 
 # Trained model checkpoints (large; reproducible from training scripts)
-rl/checkpoints/
+14.1/checkpoints/
+eight_ball/checkpoints/
 
 # Training logs
 *.log
-rl/autoresearch/
-rl/gpu_run_*/
 
 # Demo recording artifacts
 *.gif
