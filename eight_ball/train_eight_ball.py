@@ -175,6 +175,13 @@ def train_eight_ball(num_envs=8, device_name='cpu', max_iters=1000,
                        num_layers=num_layers).to(device)
     if warm_start and os.path.exists(warm_start):
         state = torch.load(warm_start, map_location=device, weights_only=True)
+        key = 'shot_encoder.0.weight'
+        if key in state and state[key].shape[1] < net.shot_encoder[0].in_features:
+            pad_cols = net.shot_encoder[0].in_features - state[key].shape[1]
+            state[key] = torch.cat([
+                state[key],
+                torch.zeros(state[key].shape[0], pad_cols, device=state[key].device),
+            ], dim=1)
         missing, unexpected = net.load_state_dict(state, strict=False)
         print(f'Warm-started from {warm_start}', flush=True)
         if missing:
