@@ -49,6 +49,13 @@ def load_net(ckpt_path, embed_dim=128, num_heads=8, num_layers=4,
     _net = EightBallNet(embed_dim=embed_dim, num_heads=num_heads,
                         num_layers=num_layers).to(_device)
     state = torch.load(ckpt_path, map_location=_device, weights_only=True)
+    key = 'shot_encoder.0.weight'
+    if key in state and state[key].shape[1] < _net.shot_encoder[0].in_features:
+        pad_cols = _net.shot_encoder[0].in_features - state[key].shape[1]
+        state[key] = torch.cat([
+            state[key],
+            torch.zeros(state[key].shape[0], pad_cols, device=state[key].device),
+        ], dim=1)
     _net.load_state_dict(state, strict=False)
     _net.eval()
     print(f'Loaded 8-ball net: {ckpt_path} ({sum(p.numel() for p in _net.parameters()):,} params)')

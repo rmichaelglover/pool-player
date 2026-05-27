@@ -24,6 +24,14 @@ def load_model(path, device='cpu', embed_dim=128, num_heads=8, num_layers=4):
                        num_layers=num_layers).to(device)
     if path and os.path.exists(path):
         state = torch.load(path, map_location=device, weights_only=True)
+        # Pad shot_encoder weight if checkpoint has fewer input features (pre-bank-shot)
+        key = 'shot_encoder.0.weight'
+        if key in state and state[key].shape[1] < net.shot_encoder[0].in_features:
+            pad_cols = net.shot_encoder[0].in_features - state[key].shape[1]
+            state[key] = torch.cat([
+                state[key],
+                torch.zeros(state[key].shape[0], pad_cols, device=state[key].device),
+            ], dim=1)
         net.load_state_dict(state, strict=False)
     return net
 
