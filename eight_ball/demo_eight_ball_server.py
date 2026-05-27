@@ -223,7 +223,7 @@ def handle_legal_shots(payload):
 
     batch = obs_to_batch(obs, _device)
     with torch.no_grad():
-        scores, f_means, s_means, safety_logit, value = _net.forward(**batch)
+        scores, f_means, s_means, safety_logit, value, _ = _net.forward(**batch)
 
     n_legal = len(obs.shot_meta)
     score_arr = scores[0, :n_legal].cpu().numpy()
