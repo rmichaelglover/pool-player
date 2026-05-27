@@ -888,8 +888,15 @@ def main():
         _p7_net = PoolGameNet(embed_dim=args.p7_embed_dim,
                               num_heads=args.p7_num_heads,
                               num_layers=args.p7_num_layers).to(_device)
-        _p7_net.load_state_dict(torch.load(args.p7_ckpt, map_location=_device,
-                                            weights_only=True))
+        state = torch.load(args.p7_ckpt, map_location=_device, weights_only=True)
+        key = 'shot_encoder.0.weight'
+        if key in state and state[key].shape[1] < _p7_net.shot_encoder[0].in_features:
+            pad_cols = _p7_net.shot_encoder[0].in_features - state[key].shape[1]
+            state[key] = torch.cat([
+                state[key],
+                torch.zeros(state[key].shape[0], pad_cols, device=state[key].device),
+            ], dim=1)
+        _p7_net.load_state_dict(state)
         _p7_net.eval()
         print(f'Loaded Phase 7 net: {args.p7_ckpt}')
         if any(v > 0 for v in _p7_noise.values()):
