@@ -290,13 +290,22 @@ function render(cue, balls) {
     drawBall(cue[0], cue[1], 0);
 }
 
-function drawLegalShotLines(shots, balls) {
+function drawLegalShotLines(shots, balls, cue) {
     if (!shots || !shots.length) return;
+    // Find the chosen shot (highest probability)
+    let chosenIdx = 0;
+    for (let i = 1; i < shots.length; i++) {
+        if ((shots[i].prob || 0) > (shots[chosenIdx].prob || 0)) chosenIdx = i;
+    }
+
+    // Draw non-chosen shots as faint dashed lines
     ctx.save();
     ctx.setLineDash([4,4]);
-    ctx.strokeStyle = 'rgba(150,180,220,0.45)';
+    ctx.strokeStyle = 'rgba(150,180,220,0.3)';
     ctx.lineWidth = 1;
-    for (const s of shots) {
+    for (let i = 0; i < shots.length; i++) {
+        if (i === chosenIdx) continue;
+        const s = shots[i];
         const ball = balls.find(b => b.id === s.ball_id);
         if (!ball) continue;
         const [px,py] = POCKETS[s.pocket_idx];
@@ -306,12 +315,58 @@ function drawLegalShotLines(shots, balls) {
         ctx.stroke();
     }
     ctx.restore();
+
+    // Draw chosen shot: solid gold line from ball to pocket
+    const chosen = shots[chosenIdx];
+    const chosenBall = balls.find(b => b.id === chosen.ball_id);
+    if (chosenBall) {
+        const [px, py] = POCKETS[chosen.pocket_idx];
+
+        // Ghost ball position (where cue must contact)
+        const bpx = px - chosenBall.x, bpy = py - chosenBall.y;
+        const bpm = Math.hypot(bpx, bpy);
+        let ghostX, ghostY;
+        if (bpm > 1e-6) {
+            ghostX = chosenBall.x - 2*BALL_R*bpx/bpm;
+            ghostY = chosenBall.y - 2*BALL_R*bpy/bpm;
+        } else { ghostX = chosenBall.x; ghostY = chosenBall.y; }
+
+        // Aim line: cue -> ghost ball
+        if (cue) {
+            ctx.beginPath(); ctx.setLineDash([5,4]);
+            ctx.moveTo(tx(cue[0]), ty(cue[1]));
+            ctx.lineTo(tx(ghostX), ty(ghostY));
+            ctx.strokeStyle = '#7dd3fc'; ctx.lineWidth = 1.5; ctx.stroke();
+            ctx.setLineDash([]);
+            // Ghost ball circle
+            ctx.beginPath(); ctx.arc(tx(ghostX), ty(ghostY), BALL_R*scaleX, 0, Math.PI*2);
+            ctx.strokeStyle = 'rgba(125,211,252,0.6)';
+            ctx.setLineDash([3,3]); ctx.lineWidth = 1; ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        // Ball-to-pocket line (solid gold)
+        ctx.beginPath();
+        ctx.moveTo(tx(chosenBall.x), ty(chosenBall.y));
+        ctx.lineTo(tx(px), ty(py));
+        ctx.strokeStyle = '#f3c77a'; ctx.lineWidth = 2; ctx.stroke();
+
+        // Highlight ring on target ball
+        ctx.beginPath();
+        ctx.arc(tx(chosenBall.x), ty(chosenBall.y), BALL_R*scaleX+4, 0, Math.PI*2);
+        ctx.strokeStyle = '#f3c77a'; ctx.lineWidth = 2; ctx.stroke();
+
+        // Pocket ring
+        const pr = ((px===TABLE_L/2) ? 2.75 : 2.5) * scaleX;
+        ctx.beginPath(); ctx.arc(tx(px), ty(py), pr+6, 0, Math.PI*2);
+        ctx.strokeStyle = '#f3c77a'; ctx.lineWidth = 2; ctx.stroke();
+    }
+
     // Probability labels
     ctx.save(); ctx.setLineDash([]);
-    ctx.fillStyle = '#f4ecd8';
-    ctx.strokeStyle = 'rgba(0,0,0,0.7)'; ctx.lineWidth = 3;
     ctx.font = '10px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    for (const s of shots) {
+    for (let i = 0; i < shots.length; i++) {
+        const s = shots[i];
         if (s.prob == null) continue;
         const ball = balls.find(b => b.id === s.ball_id);
         if (!ball) continue;
@@ -319,6 +374,10 @@ function drawLegalShotLines(shots, balls) {
         const lx = tx(ball.x + 0.35*(px-ball.x));
         const ly = ty(ball.y + 0.35*(py-ball.y));
         const txt = s.prob >= 0.10 ? s.prob.toFixed(2) : s.prob.toFixed(3);
+        const isChosen = (i === chosenIdx);
+        ctx.fillStyle = isChosen ? '#f3c77a' : '#f4ecd8';
+        ctx.strokeStyle = 'rgba(0,0,0,0.7)'; ctx.lineWidth = 3;
+        ctx.font = isChosen ? 'bold 12px sans-serif' : '10px sans-serif';
         ctx.strokeText(txt, lx, ly);
         ctx.fillText(txt, lx, ly);
     }
@@ -468,7 +527,7 @@ async function fetchLegalShots() {
 async function showLegalShots() {
     if (!currentState) return;
     const data = await fetchLegalShots();
-    drawLegalShotLines(data.shots || [], currentState.balls);
+    drawLegalShotLines(data.shots || [], currentState.balls, currentState.cue);
 }
 
 // ── Game flow ─────────────────────────────────────────────────────────────
