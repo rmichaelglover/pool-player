@@ -183,8 +183,8 @@ class EightBallNet(nn.Module):
         # Per-shot outputs
         shot_out = self.shot_head(shot_enc)
         shot_scores = shot_out[..., 0]
-        force_means = shot_out[..., 1]
-        spin_means = shot_out[..., 2]
+        force_means = shot_out[..., 1].clamp(-3, 3)
+        spin_means = shot_out[..., 2].clamp(-3, 3)
         shot_scores = shot_scores.masked_fill(~shot_mask, -1e9)
 
         # Pool non-shot tokens for value + safety heads
