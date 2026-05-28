@@ -229,7 +229,8 @@ class Phase7Env:
                               1.0 if POCKET_RADII[i] < 2.6 else 0.0]
 
         legal = self.get_legal_shots()
-        legal = legal[:MAX_SHOTS]  # hard cap
+        if len(legal) > MAX_SHOTS:
+            legal = sorted(legal, key=lambda s: s.difficulty)[:MAX_SHOTS]
         shots_arr = np.zeros((MAX_SHOTS, 10), dtype=np.float32)
         shot_mask = np.zeros(MAX_SHOTS, dtype=bool)
         for i, s in enumerate(legal):

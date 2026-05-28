@@ -363,10 +363,21 @@ function drawLegalShotLines(shots, balls) {
     for (const s of shots) {
         const ball = balls.find(b => b.id === s.ball_id);
         if (!ball) continue;
-        const [px, py] = POCKETS[s.pocket_idx];
         ctx.beginPath();
         ctx.moveTo(tx(ball.x), ty(ball.y));
-        ctx.lineTo(tx(px), ty(py));
+        if (s.is_bank && s.reflection_point) {
+            // Bank: ball → reflection → real pocket. aim_point for banks
+            // is the virtual mirrored pocket and sits off the table.
+            const [rx, ry] = s.reflection_point;
+            const [px, py] = POCKETS[s.pocket_idx];
+            ctx.lineTo(tx(rx), ty(ry));
+            ctx.lineTo(tx(px), ty(py));
+        } else {
+            // Direct: ball → aim_point so multi-aim variants on the same
+            // pocket fan to different points on the cushion-back chord.
+            const aim = s.aim_point || POCKETS[s.pocket_idx];
+            ctx.lineTo(tx(aim[0]), ty(aim[1]));
+        }
         ctx.stroke();
     }
     ctx.restore();
@@ -383,11 +394,20 @@ function drawLegalShotLines(shots, balls) {
         if (s.prob == null) continue;
         const ball = balls.find(b => b.id === s.ball_id);
         if (!ball) continue;
-        const [px, py] = POCKETS[s.pocket_idx];
-        // Place text 35% from ball toward pocket (closer to OB so multiple
-        // shots from the same ball don't all collide near the pocket).
-        const tx_pos = tx(ball.x + 0.35 * (px - ball.x));
-        const ty_pos = ty(ball.y + 0.35 * (py - ball.y));
+        // Anchor label along the visible path: midway to the reflection
+        // point for banks, 35% along ball→aim otherwise. Using the per-shot
+        // aim_point (not pocket center) so multi-aim variants don't stack.
+        let lx, ly;
+        if (s.is_bank && s.reflection_point) {
+            lx = ball.x + 0.5 * (s.reflection_point[0] - ball.x);
+            ly = ball.y + 0.5 * (s.reflection_point[1] - ball.y);
+        } else {
+            const aim = s.aim_point || POCKETS[s.pocket_idx];
+            lx = ball.x + 0.35 * (aim[0] - ball.x);
+            ly = ball.y + 0.35 * (aim[1] - ball.y);
+        }
+        const tx_pos = tx(lx);
+        const ty_pos = ty(ly);
         const fmtProb = (p) => (p >= 0.10
             ? p.toFixed(2)
             : p.toFixed(4).replace(/^0\./, '.'));

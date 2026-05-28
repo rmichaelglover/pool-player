@@ -564,6 +564,10 @@ def handle_legal_shots(payload):
                     'pocket_idx': s.pocket_idx,
                     'cut_angle_deg': s.cut_angle_deg,
                     'aim_point': list(s.aim_point),
+                    'is_bank': bool(s.is_bank),
+                    'reflection_point': (list(s.reflection_point)
+                                          if s.reflection_point is not None
+                                          else None),
                     'prob': float(probs_legal[i]),
                     'prob_raw': float(probs_raw[i]),
                 }
@@ -582,6 +586,10 @@ def handle_legal_shots(payload):
                 'pocket_idx': s.pocket_idx,
                 'cut_angle_deg': s.cut_angle_deg,
                 'aim_point': list(s.aim_point),
+                'is_bank': bool(s.is_bank),
+                'reflection_point': (list(s.reflection_point)
+                                      if s.reflection_point is not None
+                                      else None),
                 'prob': None,
             }
             for s in shots
