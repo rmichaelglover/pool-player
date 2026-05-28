@@ -345,10 +345,16 @@ def handle_legal_shots(payload):
     with torch.no_grad():
         scores, f_means, s_means, safety_logit, value, _ = _net.forward(**batch)
 
+    try:
+        temperature = max(1.0, float(payload.get('temperature', 4.0)))
+    except (TypeError, ValueError):
+        temperature = 4.0
+
     n_legal = len(obs.shot_meta)
     score_arr = scores[0, :n_legal].cpu().numpy()
-    m = score_arr.max()
-    exp_scores = np.exp(score_arr - m)
+    scaled = score_arr / temperature
+    m = scaled.max()
+    exp_scores = np.exp(scaled - m)
     probs = exp_scores / exp_scores.sum()
 
     return {
