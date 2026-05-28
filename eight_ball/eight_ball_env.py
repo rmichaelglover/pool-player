@@ -340,7 +340,8 @@ class EightBallEnv:
             legal = []
         else:
             legal = self.get_legal_shots()
-            legal = legal[:MAX_SHOTS]
+            if len(legal) > MAX_SHOTS:
+                legal = sorted(legal, key=lambda s: s.difficulty)[:MAX_SHOTS]
         for i, s in enumerate(legal):
             bx, by = self.balls[s.ball_id]
             pocket_pos = POCKETS[s.pocket_idx]

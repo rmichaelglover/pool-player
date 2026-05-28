@@ -18,7 +18,7 @@ from typing import Iterable
 from table_geometry import (TABLE_LENGTH, TABLE_WIDTH, BALL_R as R,
                               POCKETS, POCKET_NAMES, CUSHIONS, FACINGS,
                               CORNER_RAIL_OFFSET, SIDE_HALF, pocket_captures,
-                              optimal_pocket_aim,
+                              optimal_pocket_aim, pocket_aim_candidates,
                               _POCKET_FACING_PAIRS, _SIDE_POCKETS)
 
 # Backward-compat: some older callers expect a per-pocket radius (was used
@@ -334,68 +334,64 @@ def generate_legal_shots(cue_pos, balls, max_cut_deg=80.0, min_pocket_dist=1.0,
                           pocket_pos[1] - ball_pos[1]) < min_pocket_dist:
                 continue
 
-            # Compute optimal per-shot aim point. Returns None if no direct
-            # straight-line trajectory threads the pocket corridor with ball-
-            # radius clearance from each cushion corner — subsumes the old
-            # `can_pocket_directly` check. The aim point sits on the cushion-
-            # back chord (deeper than the pocket-mouth center), which is what
-            # real players use for steep approaches.
-            aim_point = optimal_pocket_aim(ball_pos, p_idx)
-            if aim_point is None:
-                continue
+            # Side pockets emit up to 3 aim candidates spread across the
+            # feasible corridor; corner pockets emit 1 (their wide mouth
+            # rarely benefits). Each candidate becomes its own LegalShot if
+            # it survives the downstream checks below.
+            for aim_point in pocket_aim_candidates(ball_pos, p_idx):
+                ghost = ghost_ball(ball_pos, aim_point)
+                if not _ghost_on_table(ghost):
+                    continue
 
-            ghost = ghost_ball(ball_pos, aim_point)
-            if not _ghost_on_table(ghost):
-                continue
+                # Cue must be "behind" the ball relative to the aim — i.e.,
+                # (cue→ghost) should be in roughly the same direction as
+                # (ghost→ball). This rules out "shooting through the ball"
+                # from the far side.
+                bpx = ball_pos[0] - ghost[0]
+                bpy = ball_pos[1] - ghost[1]
+                cgx = ghost[0] - cue_t[0]
+                cgy = ghost[1] - cue_t[1]
+                if bpx * cgx + bpy * cgy <= 0:
+                    continue
 
-            # Cue must be "behind" the ball relative to the aim — i.e.,
-            # (cue→ghost) should be in roughly the same direction as (ghost→ball).
-            # This rules out "shooting through the ball" from the far side.
-            bpx = ball_pos[0] - ghost[0]
-            bpy = ball_pos[1] - ghost[1]
-            cgx = ghost[0] - cue_t[0]
-            cgy = ghost[1] - cue_t[1]
-            if bpx * cgx + bpy * cgy <= 0:
-                continue
+                cut = cut_angle_deg(cue_t, ghost, ball_pos, aim_point)
+                if cut > max_cut_deg:
+                    continue
 
-            cut = cut_angle_deg(cue_t, ghost, ball_pos, aim_point)
-            if cut > max_cut_deg:
-                continue
+                # Line-of-sight: cue center travels from cue_t to ghost.
+                # Exclude the target ball itself (it's at ball_pos, and
+                # ghost is offset such that cue+target contact at ghost is
+                # clean).
+                if _segment_blocked(cue_t, ghost, ball_map, exclude_ids=[ball_id]):
+                    continue
 
-            # Line-of-sight: cue center travels from cue_t to ghost. Exclude
-            # the target ball itself (it's at ball_pos, and ghost is offset
-            # such that cue+target contact at ghost is clean).
-            if _segment_blocked(cue_t, ghost, ball_map, exclude_ids=[ball_id]):
-                continue
+                # Line-of-sight: target ball travels from ball_pos toward
+                # the pocket entrance. We check TWO segments:
+                #   (a) ball → POCKETS[idx] (pocket-entrance line) — the
+                #       OB's actual physical trajectory while still on the
+                #       table.
+                #   (b) ball → aim_point (deep-throat aim) — catches
+                #       obstacles inside the throat region.
+                if _segment_blocked(ball_pos, POCKETS[p_idx], ball_map,
+                                     exclude_ids=[ball_id]):
+                    continue
+                if _segment_blocked(ball_pos, aim_point, ball_map,
+                                     exclude_ids=[ball_id]):
+                    continue
 
-            # Line-of-sight: target ball travels from ball_pos toward the
-            # pocket entrance. We check TWO segments:
-            #   (a) ball → POCKETS[idx] (pocket-entrance line) — this is the
-            #       OB's actual physical trajectory while still on the table.
-            #   (b) ball → aim_point (deep-throat aim) — catches obstacles
-            #       inside the throat region.
-            # The aim_point alone is insufficient because for balls near a
-            # rail, the deep-throat aim is OFF the table (y < 0 for top
-            # pockets), and the angled segment misses obstacles that sit
-            # right on the rail in the OB's actual path.
-            if _segment_blocked(ball_pos, POCKETS[p_idx], ball_map,
-                                 exclude_ids=[ball_id]):
-                continue
-            if _segment_blocked(ball_pos, aim_point, ball_map, exclude_ids=[ball_id]):
-                continue
-
-            aim = math.atan2(ghost[1] - cue_t[1], ghost[0] - cue_t[0])
-            shots.append(LegalShot(
-                ball_id=ball_id,
-                pocket_idx=p_idx,
-                aim_point=aim_point,
-                ghost_pos=ghost,
-                aim_angle=aim,
-                cut_angle_deg=cut,
-                cue_to_ghost_dist=math.hypot(ghost[0] - cue_t[0], ghost[1] - cue_t[1]),
-                ball_to_pocket_dist=math.hypot(pocket_pos[0] - ball_pos[0],
-                                                pocket_pos[1] - ball_pos[1]),
-            ))
+                aim = math.atan2(ghost[1] - cue_t[1], ghost[0] - cue_t[0])
+                shots.append(LegalShot(
+                    ball_id=ball_id,
+                    pocket_idx=p_idx,
+                    aim_point=aim_point,
+                    ghost_pos=ghost,
+                    aim_angle=aim,
+                    cut_angle_deg=cut,
+                    cue_to_ghost_dist=math.hypot(ghost[0] - cue_t[0],
+                                                  ghost[1] - cue_t[1]),
+                    ball_to_pocket_dist=math.hypot(pocket_pos[0] - ball_pos[0],
+                                                    pocket_pos[1] - ball_pos[1]),
+                ))
 
     if include_banks:
         banks = generate_bank_shots(cue_pos, balls,

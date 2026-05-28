@@ -210,6 +210,77 @@ def optimal_pocket_aim(ball_pos, idx: int, n_samples: int = 64):
     return best_q
 
 
+def pocket_aim_candidates(ball_pos, idx: int, n: int = 3, n_samples: int = 64):
+    """Return up to `n` aim points (≥ BALL_R corridor clearance) spread across
+    the feasible chord range for pocket `idx`. For corner pockets, returns the
+    single optimal aim wrapped in a list (the wide mouth rarely benefits from
+    multiple candidates). For side pockets, returns up to `n` candidates so
+    that downstream checks (line-of-sight, cut angle) get multiple chances
+    to find a legal shot.
+    """
+    if idx not in _SIDE_POCKETS:
+        opt = optimal_pocket_aim(ball_pos, idx, n_samples=n_samples)
+        return [opt] if opt is not None else []
+
+    bx, by = ball_pos
+    fa_idx, fb_idx = _POCKET_FACING_PAIRS[idx]
+    fa = FACINGS[fa_idx]; fb = FACINGS[fb_idx]
+    Ax, Ay = fa[2], fa[3]
+    Cx, Cy = fb[2], fb[3]
+    AC_dx = Cx - Ax; AC_dy = Cy - Ay
+    L_back = math.hypot(AC_dx, AC_dy)
+    if L_back < 1e-9:
+        return []
+
+    endpoints = ((fa[0], fa[1]), (fb[0], fb[1]), (Ax, Ay), (Cx, Cy))
+    s_min = BALL_R / L_back
+    s_max = 1.0 - s_min
+    if s_min >= s_max:
+        return []
+
+    feasible = []  # (s, qx, qy)
+    for k in range(n_samples + 1):
+        s = s_min + (s_max - s_min) * (k / n_samples)
+        qx = Ax + s * AC_dx
+        qy = Ay + s * AC_dy
+        dx = qx - bx; dy = qy - by
+        d_len = math.hypot(dx, dy)
+        if d_len < 1e-9:
+            continue
+        ghost_x = bx - 2.0 * BALL_R * dx / d_len
+        ghost_y = by - 2.0 * BALL_R * dy / d_len
+        if not (BALL_R <= ghost_x <= TABLE_LENGTH - BALL_R and
+                BALL_R <= ghost_y <= TABLE_WIDTH - BALL_R):
+            continue
+        clearance = float('inf')
+        for ex, ey in endpoints:
+            dist = abs(dy * (ex - bx) - dx * (ey - by)) / d_len
+            if dist < clearance:
+                clearance = dist
+                if clearance < BALL_R:
+                    break
+        if clearance >= BALL_R:
+            feasible.append((s, qx, qy))
+
+    if not feasible:
+        return []
+    if len(feasible) <= n:
+        return [(qx, qy) for _, qx, qy in feasible]
+
+    s_lo, s_hi = feasible[0][0], feasible[-1][0]
+    targets = [s_lo + (s_hi - s_lo) * (i / (n - 1)) for i in range(n)]
+    picks = []
+    used = set()
+    for t in targets:
+        best_i = min(range(len(feasible)),
+                      key=lambda i: abs(feasible[i][0] - t))
+        if best_i in used:
+            continue
+        used.add(best_i)
+        picks.append((feasible[best_i][1], feasible[best_i][2]))
+    return picks
+
+
 def can_pocket_directly(ball_pos, idx: int) -> bool:
     """Convenience wrapper: True iff a feasible direct aim exists."""
     return optimal_pocket_aim(ball_pos, idx) is not None
