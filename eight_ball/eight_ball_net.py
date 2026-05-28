@@ -83,7 +83,7 @@ class EightBallNet(nn.Module):
             nn.GELU(),
         )
         self.shot_encoder = nn.Sequential(
-            nn.Linear(10, embed_dim),
+            nn.Linear(11, embed_dim),
             nn.LayerNorm(embed_dim),
             nn.GELU(),
         )

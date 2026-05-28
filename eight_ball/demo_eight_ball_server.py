@@ -156,12 +156,21 @@ def handle_next_shot(payload):
         }
 
     if not obs.shot_meta:
+        cue_before = list(env.cue)
+        balls_before = serialize_balls(env)
         obs_next, reward, done, info = env.step(
             0, 0.0, 0.0, obs,
             record_trajectory=False,
         )
+        # Synthesize a brief stub trajectory so the foul reads as a
+        # deliberate "no shot taken" beat instead of a silent teleport.
+        ball_ids = [0] + [b['id'] for b in balls_before]
+        positions = [(cue_before[0], cue_before[1])] + [
+            (b['x'], b['y']) for b in balls_before]
+        stub_frame = [list(p) for p in positions]
+        stub_traj = [stub_frame for _ in range(30)]
         return {
-            'trajectory': [], 'ball_ids_order': [],
+            'trajectory': stub_traj, 'ball_ids_order': ball_ids,
             'pocketed_ids': [], 'scratch': False,
             'foul': info.get('foul'),
             'is_safety': False,

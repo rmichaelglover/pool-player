@@ -22,7 +22,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, '..', 'shared'))
 from pool_sim import simulate_shot
-from shot_enumerator import (generate_legal_shots, POCKETS, POCKET_NAMES,
+from shot_enumerator import (generate_legal_shots, generate_defensive_shots,
+                              POCKETS, POCKET_NAMES,
                               POCKET_RADII, R, LegalShot)
 from rack_geometry import RACK_APEX, RACK_POSITIONS
 from shot_utils import first_ball_struck, pocket_index_of, HEAD_SPOT
@@ -259,7 +260,11 @@ class EightBallEnv:
         all_shots = generate_legal_shots(self.cue, self.balls, max_cut_deg=80.0,
                                           include_banks=True)
         if self.phase == OPEN_TABLE:
-            return [s for s in all_shots if s.ball_id != 8]
+            shots = [s for s in all_shots if s.ball_id != 8]
+            if shots:
+                return shots
+            target_ids = [b for b in self.balls if b != 8]
+            return generate_defensive_shots(self.cue, self.balls, target_ids)
 
         if self._on_8ball():
             eight_shots = [s for s in all_shots if s.ball_id == 8]
@@ -267,14 +272,20 @@ class EightBallEnv:
                 return eight_shots
             wide = generate_legal_shots(self.cue, self.balls, max_cut_deg=89.0,
                                          include_banks=True)
-            return [s for s in wide if s.ball_id == 8]
+            shots = [s for s in wide if s.ball_id == 8]
+            if shots:
+                return shots
+            return generate_defensive_shots(self.cue, self.balls, [8])
         my_ids = self._my_ball_ids()
         own_shots = [s for s in all_shots if s.ball_id in my_ids]
         if own_shots:
             return own_shots
         wide = generate_legal_shots(self.cue, self.balls, max_cut_deg=89.0,
                                      include_banks=True)
-        return [s for s in wide if s.ball_id in my_ids]
+        shots = [s for s in wide if s.ball_id in my_ids]
+        if shots:
+            return shots
+        return generate_defensive_shots(self.cue, self.balls, list(my_ids))
 
     def get_obs(self) -> EightBallObs:
         balls_arr = np.full((MAX_BALLS, 2), -1.0, dtype=np.float32)
@@ -323,7 +334,7 @@ class EightBallEnv:
         gs[7] = min(self.consecutive_fouls[self.current_player], 3) / 3.0
 
         # Legal shots (empty during placement)
-        shots_arr = np.zeros((MAX_SHOTS, 10), dtype=np.float32)
+        shots_arr = np.zeros((MAX_SHOTS, 11), dtype=np.float32)
         shot_mask = np.zeros(MAX_SHOTS, dtype=bool)
         if self.awaiting_placement:
             legal = []
@@ -341,6 +352,7 @@ class EightBallEnv:
                 s.cue_to_ghost_dist / TABLE_LENGTH,
                 s.ball_to_pocket_dist / TABLE_LENGTH,
                 1.0 if s.is_bank else 0.0,
+                1.0 if s.is_defensive else 0.0,
             ]
             shot_mask[i] = True
 

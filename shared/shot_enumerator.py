@@ -42,6 +42,7 @@ class LegalShot:
     is_bank: bool = False
     rail_idx: int = -1            # CUSHIONS index (0-5), -1 for direct
     reflection_point: tuple | None = None
+    is_defensive: bool = False    # tier-2: legal contact only, no pocket attempt
 
     @property
     def difficulty(self) -> float:
@@ -402,6 +403,76 @@ def generate_legal_shots(cue_pos, balls, max_cut_deg=80.0, min_pocket_dist=1.0,
                                      min_pocket_dist=min_pocket_dist)
         shots.extend(banks)
 
+    return shots
+
+
+def _project_to_nearest_rail(pos, direction):
+    """Where a ball traveling from `pos` in unit `direction` first hits a rail
+    (ball-center coordinates, so cushion line is at R / TABLE_DIM-R)."""
+    x, y = pos
+    nx, ny = direction
+    ts = []
+    if nx > 1e-9:
+        ts.append(((TABLE_LENGTH - R) - x) / nx)
+    elif nx < -1e-9:
+        ts.append((R - x) / nx)
+    if ny > 1e-9:
+        ts.append(((TABLE_WIDTH - R) - y) / ny)
+    elif ny < -1e-9:
+        ts.append((R - y) / ny)
+    ts = [t for t in ts if t > 0]
+    if not ts:
+        return pos
+    t = min(ts)
+    return (x + nx * t, y + ny * t)
+
+
+def generate_defensive_shots(cue_pos, balls, target_ids, min_target_dist=4 * R):
+    """Tier-2 shots: straight-on contact with each reachable target ball.
+
+    Used when no makeable (pocketable) shot exists, so the AI can attempt
+    legal contact instead of forcing a 'no legal shots' foul. Each emitted
+    shot aims at the ball center (cut_angle=0); `aim_point` is set to the
+    rail point the object ball would reach if struck head-on, so the env's
+    step() drives the ball along that line and rail contact provides the
+    legal-shot requirement.
+    """
+    shots: list[LegalShot] = []
+    cue_t = tuple(cue_pos)
+    ball_map = {bid: tuple(pos) for bid, pos in balls.items()}
+
+    for ball_id in target_ids:
+        if ball_id not in ball_map:
+            continue
+        ball_pos = ball_map[ball_id]
+        dx, dy = ball_pos[0] - cue_t[0], ball_pos[1] - cue_t[1]
+        dist = math.hypot(dx, dy)
+        if dist < min_target_dist:
+            continue
+        nx, ny = dx / dist, dy / dist
+        ghost = (ball_pos[0] - 2 * R * nx, ball_pos[1] - 2 * R * ny)
+        if not _ghost_on_table(ghost):
+            continue
+        if _segment_blocked(cue_t, ghost, ball_map, exclude_ids=[ball_id]):
+            continue
+
+        rail_target = _project_to_nearest_rail(ball_pos, (nx, ny))
+        nearest_pocket_idx = min(
+            range(len(POCKETS)),
+            key=lambda i: math.hypot(POCKETS[i][0] - ball_pos[0],
+                                      POCKETS[i][1] - ball_pos[1]))
+        shots.append(LegalShot(
+            ball_id=ball_id,
+            pocket_idx=nearest_pocket_idx,
+            aim_point=rail_target,
+            ghost_pos=ghost,
+            aim_angle=math.atan2(ghost[1] - cue_t[1], ghost[0] - cue_t[0]),
+            cut_angle_deg=0.0,
+            cue_to_ghost_dist=math.hypot(ghost[0] - cue_t[0], ghost[1] - cue_t[1]),
+            ball_to_pocket_dist=math.hypot(rail_target[0] - ball_pos[0],
+                                            rail_target[1] - ball_pos[1]),
+            is_defensive=True,
+        ))
     return shots
 
 
