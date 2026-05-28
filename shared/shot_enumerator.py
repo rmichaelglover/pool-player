@@ -43,6 +43,7 @@ class LegalShot:
     rail_idx: int = -1            # CUSHIONS index (0-5), -1 for direct
     reflection_point: tuple | None = None
     is_defensive: bool = False    # tier-2: legal contact only, no pocket attempt
+    is_kick: bool = False         # tier-3: cue ball banks off a rail to reach target
 
     @property
     def difficulty(self) -> float:
@@ -469,6 +470,68 @@ def generate_defensive_shots(cue_pos, balls, target_ids, min_target_dist=4 * R):
                                             rail_target[1] - ball_pos[1]),
             is_defensive=True,
         ))
+    return shots
+
+
+def generate_kick_shots(cue_pos, balls, target_ids, min_target_dist=4 * R,
+                         skip_blocking=False):
+    """Tier-3 shots: cue ball banks off one rail to make legal contact with
+    each reachable target ball. Used when even tier-2 (direct defensive)
+    is blocked. Mirror the target across each rail, find the reflection
+    point where cue→mirror crosses the rail, and emit one shot per
+    (target, rail) pair whose cue→reflection→target path is clear.
+
+    skip_blocking=True relaxes the line-of-sight checks so the env still
+    gets *some* action to simulate in genuinely stuck positions (the
+    simulation will likely foul on the blocker, but the player at least
+    attempts the kick rather than doing nothing).
+    """
+    shots: list[LegalShot] = []
+    cue_t = tuple(cue_pos)
+    ball_map = {bid: tuple(pos) for bid, pos in balls.items()}
+
+    for ball_id in target_ids:
+        if ball_id not in ball_map:
+            continue
+        ball_pos = ball_map[ball_id]
+        for c_idx, cushion in enumerate(CUSHIONS):
+            mirror_target = _mirror_pocket(ball_pos, cushion)
+            refl = _bank_reflection_point(cue_t, mirror_target, cushion)
+            if refl is None:
+                continue
+            if not skip_blocking:
+                if _segment_blocked(cue_t, refl, ball_map, exclude_ids=[ball_id]):
+                    continue
+                if _segment_blocked(refl, ball_pos, ball_map, exclude_ids=[ball_id]):
+                    continue
+            dx = ball_pos[0] - refl[0]
+            dy = ball_pos[1] - refl[1]
+            d = math.hypot(dx, dy)
+            if d < min_target_dist:
+                continue
+            nx, ny = dx / d, dy / d
+            ghost = (ball_pos[0] - 2 * R * nx, ball_pos[1] - 2 * R * ny)
+            nearest_pocket_idx = min(
+                range(len(POCKETS)),
+                key=lambda i: math.hypot(POCKETS[i][0] - ball_pos[0],
+                                          POCKETS[i][1] - ball_pos[1]))
+            shots.append(LegalShot(
+                ball_id=ball_id,
+                pocket_idx=nearest_pocket_idx,
+                aim_point=mirror_target,
+                ghost_pos=ghost,
+                aim_angle=math.atan2(refl[1] - cue_t[1], refl[0] - cue_t[0]),
+                cut_angle_deg=0.0,
+                cue_to_ghost_dist=math.hypot(refl[0] - cue_t[0],
+                                              refl[1] - cue_t[1]) + d,
+                ball_to_pocket_dist=math.hypot(
+                    POCKETS[nearest_pocket_idx][0] - ball_pos[0],
+                    POCKETS[nearest_pocket_idx][1] - ball_pos[1]),
+                is_defensive=True,
+                is_kick=True,
+                rail_idx=c_idx,
+                reflection_point=refl,
+            ))
     return shots
 
 

@@ -364,6 +364,7 @@ def handle_legal_shots(payload):
                 'pocket_idx': s.pocket_idx,
                 'aim_point': [s.aim_point[0], s.aim_point[1]],
                 'is_bank': bool(s.is_bank),
+                'is_kick': bool(getattr(s, 'is_kick', False)),
                 'reflection_point': (
                     [s.reflection_point[0], s.reflection_point[1]]
                     if s.reflection_point is not None else None),

@@ -313,14 +313,23 @@ function drawLegalShotLines(shots, balls, cue) {
         const ball = balls.find(b => b.id === s.ball_id);
         if (!ball) continue;
         ctx.beginPath();
-        ctx.moveTo(tx(ball.x), ty(ball.y));
-        if (s.is_bank && s.reflection_point) {
+        if (s.is_kick && s.reflection_point && cue) {
+            // Kick: cue → reflection → ball (cue ball banks off rail to
+            // contact the target ball). Starts at cue, not ball.
+            const [rx, ry] = s.reflection_point;
+            ctx.moveTo(tx(cue[0]), ty(cue[1]));
+            ctx.lineTo(tx(rx), ty(ry));
+            ctx.lineTo(tx(ball.x), ty(ball.y));
+        } else if (s.is_bank && s.reflection_point) {
+            // Bank: ball → reflection → real pocket
             const [rx, ry] = s.reflection_point;
             const [px, py] = POCKETS[s.pocket_idx];
+            ctx.moveTo(tx(ball.x), ty(ball.y));
             ctx.lineTo(tx(rx), ty(ry));
             ctx.lineTo(tx(px), ty(py));
         } else {
             const aim = s.aim_point || POCKETS[s.pocket_idx];
+            ctx.moveTo(tx(ball.x), ty(ball.y));
             ctx.lineTo(tx(aim[0]), ty(aim[1]));
         }
         ctx.stroke();
@@ -328,16 +337,24 @@ function drawLegalShotLines(shots, balls, cue) {
     ctx.restore();
 
     // Draw chosen shot: solid gold line from ball to its aim point
-    // (or, for banks, the 2-segment ball→reflection→pocket path).
+    // (or, for banks, the 2-segment ball→reflection→pocket path; or,
+    // for kicks, the 2-segment cue→reflection→ball path).
     const chosen = shots[chosenIdx];
     const chosenBall = balls.find(b => b.id === chosen.ball_id);
     if (chosenBall) {
-        // Aim direction (for ghost ball calculation) always uses the
-        // shot's aim_point — for banks that's the virtual pocket, which
-        // is the correct cue-contact direction.
-        const aim = chosen.aim_point || POCKETS[chosen.pocket_idx];
-        const px = aim[0], py = aim[1];
-        const bpx = px - chosenBall.x, bpy = py - chosenBall.y;
+        // Ghost direction: for kicks, the cue arrives at the ball along
+        // refl→ball after bouncing — not along the straight ball→aim
+        // line (which crosses through the rail). For banks/direct, the
+        // cue's contact direction matches ball→aim.
+        let bpx, bpy;
+        if (chosen.is_kick && chosen.reflection_point) {
+            bpx = chosenBall.x - chosen.reflection_point[0];
+            bpy = chosenBall.y - chosen.reflection_point[1];
+        } else {
+            const aim = chosen.aim_point || POCKETS[chosen.pocket_idx];
+            bpx = aim[0] - chosenBall.x;
+            bpy = aim[1] - chosenBall.y;
+        }
         const bpm = Math.hypot(bpx, bpy);
         let ghostX, ghostY;
         if (bpm > 1e-6) {
@@ -345,10 +362,15 @@ function drawLegalShotLines(shots, balls, cue) {
             ghostY = chosenBall.y - 2*BALL_R*bpy/bpm;
         } else { ghostX = chosenBall.x; ghostY = chosenBall.y; }
 
-        // Aim line: cue -> ghost ball
+        // Aim line: cue → ghost ball. For kicks, route through the rail
+        // reflection point so the line actually shows the bounced path.
         if (cue) {
             ctx.beginPath(); ctx.setLineDash([5,4]);
             ctx.moveTo(tx(cue[0]), ty(cue[1]));
+            if (chosen.is_kick && chosen.reflection_point) {
+                ctx.lineTo(tx(chosen.reflection_point[0]),
+                           ty(chosen.reflection_point[1]));
+            }
             ctx.lineTo(tx(ghostX), ty(ghostY));
             ctx.strokeStyle = '#7dd3fc'; ctx.lineWidth = 1.5; ctx.stroke();
             ctx.setLineDash([]);
@@ -360,30 +382,35 @@ function drawLegalShotLines(shots, balls, cue) {
         }
 
         // Ball-to-pocket line (solid gold). Banks render as 2 segments
-        // (ball → reflection → real pocket); straight shots draw to aim.
-        ctx.beginPath();
-        ctx.moveTo(tx(chosenBall.x), ty(chosenBall.y));
-        if (chosen.is_bank && chosen.reflection_point) {
-            const [rx, ry] = chosen.reflection_point;
-            const [pktX, pktY] = POCKETS[chosen.pocket_idx];
-            ctx.lineTo(tx(rx), ty(ry));
-            ctx.lineTo(tx(pktX), ty(pktY));
-        } else {
-            ctx.lineTo(tx(px), ty(py));
+        // (ball → reflection → real pocket); straight shots draw to aim;
+        // kicks have no pocket destination so the gold line is skipped.
+        if (!chosen.is_kick) {
+            ctx.beginPath();
+            ctx.moveTo(tx(chosenBall.x), ty(chosenBall.y));
+            if (chosen.is_bank && chosen.reflection_point) {
+                const [rx, ry] = chosen.reflection_point;
+                const [pktX, pktY] = POCKETS[chosen.pocket_idx];
+                ctx.lineTo(tx(rx), ty(ry));
+                ctx.lineTo(tx(pktX), ty(pktY));
+            } else {
+                const aim = chosen.aim_point || POCKETS[chosen.pocket_idx];
+                ctx.lineTo(tx(aim[0]), ty(aim[1]));
+            }
+            ctx.strokeStyle = '#f3c77a'; ctx.lineWidth = 2; ctx.stroke();
         }
-        ctx.strokeStyle = '#f3c77a'; ctx.lineWidth = 2; ctx.stroke();
 
-        // Highlight ring on target ball
+        // Highlight ring on target ball (always, including kicks)
         ctx.beginPath();
         ctx.arc(tx(chosenBall.x), ty(chosenBall.y), BALL_R*scaleX+4, 0, Math.PI*2);
         ctx.strokeStyle = '#f3c77a'; ctx.lineWidth = 2; ctx.stroke();
 
-        // Pocket ring — anchor at the actual pocket center (aim point sits
-        // on the cushion-back chord, not at the pocket itself)
-        const [pocketX, pocketY] = POCKETS[chosen.pocket_idx];
-        const pr = ((pocketX===TABLE_L/2) ? 2.75 : 2.5) * scaleX;
-        ctx.beginPath(); ctx.arc(tx(pocketX), ty(pocketY), pr+6, 0, Math.PI*2);
-        ctx.strokeStyle = '#f3c77a'; ctx.lineWidth = 2; ctx.stroke();
+        // Pocket ring — skip for kicks (no pocket destination)
+        if (!chosen.is_kick) {
+            const [pocketX, pocketY] = POCKETS[chosen.pocket_idx];
+            const pr = ((pocketX===TABLE_L/2) ? 2.75 : 2.5) * scaleX;
+            ctx.beginPath(); ctx.arc(tx(pocketX), ty(pocketY), pr+6, 0, Math.PI*2);
+            ctx.strokeStyle = '#f3c77a'; ctx.lineWidth = 2; ctx.stroke();
+        }
     }
 
     // Probability labels
@@ -394,10 +421,13 @@ function drawLegalShotLines(shots, balls, cue) {
         if (s.prob == null) continue;
         const ball = balls.find(b => b.id === s.ball_id);
         if (!ball) continue;
-        // For banks, anchor label near the reflection point (rail bounce);
-        // for direct shots, partway along ball→aim line.
+        // For banks/kicks, anchor label near the reflection point (rail
+        // bounce); for direct shots, partway along ball→aim line.
         let tx0, ty0;
-        if (s.is_bank && s.reflection_point) {
+        if (s.is_kick && s.reflection_point && cue) {
+            tx0 = cue[0] + 0.5*(s.reflection_point[0]-cue[0]);
+            ty0 = cue[1] + 0.5*(s.reflection_point[1]-cue[1]);
+        } else if (s.is_bank && s.reflection_point) {
             tx0 = ball.x + 0.5*(s.reflection_point[0]-ball.x);
             ty0 = ball.y + 0.5*(s.reflection_point[1]-ball.y);
         } else {

@@ -23,6 +23,7 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, '..', 'shared'))
 from pool_sim import simulate_shot
 from shot_enumerator import (generate_legal_shots, generate_defensive_shots,
+                              generate_kick_shots,
                               POCKETS, POCKET_NAMES,
                               POCKET_RADII, R, LegalShot)
 from rack_geometry import RACK_APEX, RACK_POSITIONS
@@ -264,7 +265,14 @@ class EightBallEnv:
             if shots:
                 return shots
             target_ids = [b for b in self.balls if b != 8]
-            return generate_defensive_shots(self.cue, self.balls, target_ids)
+            defensive = generate_defensive_shots(self.cue, self.balls, target_ids)
+            if defensive:
+                return defensive
+            kicks = generate_kick_shots(self.cue, self.balls, target_ids)
+            if kicks:
+                return kicks
+            return generate_kick_shots(self.cue, self.balls, target_ids,
+                                        skip_blocking=True)
 
         if self._on_8ball():
             eight_shots = [s for s in all_shots if s.ball_id == 8]
@@ -275,7 +283,14 @@ class EightBallEnv:
             shots = [s for s in wide if s.ball_id == 8]
             if shots:
                 return shots
-            return generate_defensive_shots(self.cue, self.balls, [8])
+            defensive = generate_defensive_shots(self.cue, self.balls, [8])
+            if defensive:
+                return defensive
+            kicks = generate_kick_shots(self.cue, self.balls, [8])
+            if kicks:
+                return kicks
+            return generate_kick_shots(self.cue, self.balls, [8],
+                                        skip_blocking=True)
         my_ids = self._my_ball_ids()
         own_shots = [s for s in all_shots if s.ball_id in my_ids]
         if own_shots:
@@ -285,7 +300,14 @@ class EightBallEnv:
         shots = [s for s in wide if s.ball_id in my_ids]
         if shots:
             return shots
-        return generate_defensive_shots(self.cue, self.balls, list(my_ids))
+        defensive = generate_defensive_shots(self.cue, self.balls, list(my_ids))
+        if defensive:
+            return defensive
+        kicks = generate_kick_shots(self.cue, self.balls, list(my_ids))
+        if kicks:
+            return kicks
+        return generate_kick_shots(self.cue, self.balls, list(my_ids),
+                                    skip_blocking=True)
 
     def get_obs(self) -> EightBallObs:
         balls_arr = np.full((MAX_BALLS, 2), -1.0, dtype=np.float32)
