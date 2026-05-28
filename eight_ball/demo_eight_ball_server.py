@@ -15,6 +15,7 @@ Usage:
 """
 from __future__ import annotations
 import argparse
+import copy
 import json
 import math
 import os
@@ -41,6 +42,8 @@ from shot_enumerator import POCKETS, POCKET_NAMES, R
 _net = None
 _device = None
 _sessions: dict = {}
+_histories: dict = {}
+HISTORY_MAX = 50
 
 
 def load_net(ckpt_path, embed_dim=128, num_heads=8, num_layers=4,
@@ -99,6 +102,7 @@ def handle_start(payload):
     session_id = payload.get('session_id', 'default')
     env = EightBallEnv(max_shots_per_game=200)
     _sessions[session_id] = env
+    _histories[session_id] = []
     return {
         'session_id': session_id,
         'cue': list(env.cue),
@@ -117,6 +121,11 @@ def handle_next_shot(payload):
     env = _sessions[session_id]
     if env.phase == GAME_OVER:
         return {'error': 'game over', 'done': True, **game_state_dict(env)}
+
+    stack = _histories.setdefault(session_id, [])
+    stack.append(copy.deepcopy(env))
+    if len(stack) > HISTORY_MAX:
+        stack.pop(0)
 
     t0 = time.time()
     player = env.current_player
@@ -205,6 +214,27 @@ def handle_next_shot(payload):
         'search_ms': decision_ms,
         'value': float(value.item()),
         'reason': info.get('reason', ''),
+        **game_state_dict(env),
+    }
+
+
+def handle_undo(payload):
+    session_id = payload.get('session_id', 'default')
+    if session_id not in _sessions:
+        return {'error': 'no such session'}
+    stack = _histories.get(session_id, [])
+    if not stack:
+        return {'error': 'nothing to undo'}
+    env = stack.pop()
+    _sessions[session_id] = env
+    return {
+        'session_id': session_id,
+        'cue': list(env.cue),
+        'balls': serialize_balls(env),
+        'table_length': TABLE_LENGTH,
+        'table_width': TABLE_WIDTH,
+        'ball_radius': R,
+        'history_len': len(stack),
         **game_state_dict(env),
     }
 
@@ -298,6 +328,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, handle_next_shot(payload))
             elif path == '/legal_shots':
                 self._send_json(200, handle_legal_shots(payload))
+            elif path == '/undo':
+                self._send_json(200, handle_undo(payload))
             else:
                 self._send_json(404, {'error': 'unknown endpoint'})
         except Exception as e:

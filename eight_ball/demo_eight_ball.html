@@ -50,6 +50,7 @@ button.secondary { background: #555; }
     <div class="controls">
       <button id="startBtn">Start</button>
       <button id="pauseBtn" class="secondary" disabled>Pause</button>
+      <button id="undoBtn" class="secondary" disabled>Undo</button>
       <button id="resetBtn" class="secondary" disabled>Reset</button>
       <div style="margin-top:10px; display:flex; gap:12px; align-items:center;">
         <label style="font-size:13px; color:#9aa0aa; cursor:pointer;">
@@ -549,7 +550,47 @@ async function setupGame() {
     document.getElementById('startBtn').disabled = false;
     document.getElementById('pauseBtn').disabled = true;
     document.getElementById('resetBtn').disabled = false;
+    document.getElementById('undoBtn').disabled = true;
     await showLegalShots();
+}
+
+async function undoShot() {
+    if (animTimer) { clearTimeout(animTimer); animTimer = null; }
+    paused = false;
+    document.getElementById('pauseBtn').textContent = 'Pause';
+
+    const r = await fetch('/undo', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({session_id: sessionId}),
+    });
+    const data = await r.json();
+    if (data.error) {
+        document.getElementById('msg').textContent = 'Undo: ' + data.error;
+        return;
+    }
+
+    currentState = {cue: data.cue, balls: data.balls};
+    render(currentState.cue, currentState.balls);
+    document.getElementById('ballsOnTable').textContent = data.balls.length;
+    updatePlayerCards(data);
+
+    ['lastPlayer','lastTarget','lastForce','lastSpin','lastResult'].forEach(id =>
+        document.getElementById(id).textContent = '--');
+    drawTipContact(null); drawForceBar(null);
+
+    await showLegalShots();
+
+    document.getElementById('shootBtn').disabled = false;
+    waitingForShoot = true;
+    running = true;
+    document.getElementById('startBtn').disabled = true;
+    document.getElementById('pauseBtn').disabled = false;
+    document.getElementById('undoBtn').disabled = (data.history_len === 0);
+
+    const more = data.history_len > 0 ? ` (${data.history_len} more)` : '';
+    document.getElementById('msg').textContent =
+        `Backed up to Player ${data.current_player+1}'s turn${more}. Click Shoot to advance.`;
 }
 
 async function startGame() {
@@ -614,6 +655,7 @@ async function nextShot() {
             render(currentState.cue, currentState.balls);
             document.getElementById('ballsOnTable').textContent = data.balls_after.length;
             updatePlayerCards(data);
+            document.getElementById('undoBtn').disabled = false;
 
             if (data.done) {
                 running = false;
@@ -695,6 +737,7 @@ document.getElementById('resetBtn').onclick = async () => {
     document.getElementById('msg').textContent = 'Loading new game...';
     await setupGame();
 };
+document.getElementById('undoBtn').onclick = undoShot;
 document.getElementById('shootBtn').onclick = () => {
     if (!waitingForShoot) return;
     waitingForShoot = false;
