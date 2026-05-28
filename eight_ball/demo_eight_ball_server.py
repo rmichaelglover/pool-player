@@ -248,6 +248,87 @@ def handle_undo(payload):
     }
 
 
+def handle_diagnose(payload):
+    """Per-aim-point breakdown for the current session: for each own-group
+    ball x pocket, report each aim candidate and whether it passed each
+    check (corridor clearance is already gated by pocket_aim_candidates).
+    """
+    session_id = payload.get('session_id', 'default')
+    if session_id not in _sessions:
+        return {'error': 'no such session'}
+    env = _sessions[session_id]
+
+    from shot_enumerator import (ghost_ball, cut_angle_deg, _ghost_on_table,
+                                  _segment_blocked, POCKETS, POCKET_NAMES)
+    from table_geometry import pocket_aim_candidates
+
+    cue_t = tuple(env.cue)
+    ball_map = {bid: tuple(pos) for bid, pos in env.balls.items()}
+
+    if env.phase == 1:  # OPEN_TABLE
+        targets = [b for b in env.balls if b != 8]
+    elif env._on_8ball():
+        targets = [8] if 8 in env.balls else []
+    else:
+        targets = list(env._my_ball_ids())
+
+    out = []
+    for ball_id in targets:
+        if ball_id not in ball_map:
+            continue
+        ball_pos = ball_map[ball_id]
+        for p_idx, pocket_pos in enumerate(POCKETS):
+            cands = pocket_aim_candidates(ball_pos, p_idx)
+            if not cands:
+                out.append({'ball_id': ball_id, 'pocket': POCKET_NAMES[p_idx],
+                            'aim_idx': -1, 'aim_xy': None,
+                            'status': 'REJECT:no_corridor_aim'})
+                continue
+            for ai, aim_point in enumerate(cands):
+                ghost = ghost_ball(ball_pos, aim_point)
+                reason = None
+                if not _ghost_on_table(ghost):
+                    reason = 'ghost_off_table'
+                else:
+                    bpx = ball_pos[0] - ghost[0]
+                    bpy = ball_pos[1] - ghost[1]
+                    cgx = ghost[0] - cue_t[0]
+                    cgy = ghost[1] - cue_t[1]
+                    if bpx * cgx + bpy * cgy <= 0:
+                        reason = 'cue_wrong_side'
+                    else:
+                        cut = cut_angle_deg(cue_t, ghost, ball_pos, aim_point)
+                        if cut > 80.0:
+                            reason = f'cut_too_steep_{cut:.1f}'
+                        elif _segment_blocked(cue_t, ghost, ball_map,
+                                               exclude_ids=[ball_id]):
+                            reason = 'cue_path_blocked'
+                        elif _segment_blocked(ball_pos, POCKETS[p_idx], ball_map,
+                                               exclude_ids=[ball_id]):
+                            reason = 'ball_to_pocket_blocked'
+                        elif _segment_blocked(ball_pos, aim_point, ball_map,
+                                               exclude_ids=[ball_id]):
+                            reason = 'ball_to_aim_blocked'
+                out.append({
+                    'ball_id': ball_id,
+                    'pocket': POCKET_NAMES[p_idx],
+                    'aim_idx': ai,
+                    'aim_xy': [round(aim_point[0], 2), round(aim_point[1], 2)],
+                    'status': 'KEPT' if reason is None else f'REJECT:{reason}',
+                })
+    return {
+        'session_id': session_id,
+        'cue': [round(env.cue[0], 2), round(env.cue[1], 2)],
+        'balls': {bid: [round(p[0], 2), round(p[1], 2)]
+                  for bid, p in sorted(env.balls.items())},
+        'phase': env.phase,
+        'groups': env.groups,
+        'current_player': env.current_player,
+        'targets': targets,
+        'candidates': out,
+    }
+
+
 def handle_legal_shots(payload):
     session_id = payload.get('session_id', 'default')
     if session_id not in _sessions:
@@ -275,6 +356,11 @@ def handle_legal_shots(payload):
             {
                 'ball_id': s.ball_id,
                 'pocket_idx': s.pocket_idx,
+                'aim_point': [s.aim_point[0], s.aim_point[1]],
+                'is_bank': bool(s.is_bank),
+                'reflection_point': (
+                    [s.reflection_point[0], s.reflection_point[1]]
+                    if s.reflection_point is not None else None),
                 'cut_angle_deg': s.cut_angle_deg,
                 'prob': float(probs[i]),
             }
@@ -339,6 +425,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, handle_legal_shots(payload))
             elif path == '/undo':
                 self._send_json(200, handle_undo(payload))
+            elif path == '/diagnose':
+                self._send_json(200, handle_diagnose(payload))
             else:
                 self._send_json(404, {'error': 'unknown endpoint'})
         except Exception as e:

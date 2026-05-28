@@ -299,7 +299,10 @@ function drawLegalShotLines(shots, balls, cue) {
         if ((shots[i].prob || 0) > (shots[chosenIdx].prob || 0)) chosenIdx = i;
     }
 
-    // Draw non-chosen shots as faint dashed lines
+    // Draw non-chosen shots as faint dashed lines. Non-bank shots fan
+    // along their per-shot aim_point. Banks render as a 2-segment path
+    // (ball → reflection_point → real pocket) since the aim_point for
+    // banks is a virtual mirrored pocket and would crash through the rail.
     ctx.save();
     ctx.setLineDash([4,4]);
     ctx.strokeStyle = 'rgba(150,180,220,0.3)';
@@ -309,21 +312,31 @@ function drawLegalShotLines(shots, balls, cue) {
         const s = shots[i];
         const ball = balls.find(b => b.id === s.ball_id);
         if (!ball) continue;
-        const [px,py] = POCKETS[s.pocket_idx];
         ctx.beginPath();
         ctx.moveTo(tx(ball.x), ty(ball.y));
-        ctx.lineTo(tx(px), ty(py));
+        if (s.is_bank && s.reflection_point) {
+            const [rx, ry] = s.reflection_point;
+            const [px, py] = POCKETS[s.pocket_idx];
+            ctx.lineTo(tx(rx), ty(ry));
+            ctx.lineTo(tx(px), ty(py));
+        } else {
+            const aim = s.aim_point || POCKETS[s.pocket_idx];
+            ctx.lineTo(tx(aim[0]), ty(aim[1]));
+        }
         ctx.stroke();
     }
     ctx.restore();
 
-    // Draw chosen shot: solid gold line from ball to pocket
+    // Draw chosen shot: solid gold line from ball to its aim point
+    // (or, for banks, the 2-segment ball→reflection→pocket path).
     const chosen = shots[chosenIdx];
     const chosenBall = balls.find(b => b.id === chosen.ball_id);
     if (chosenBall) {
-        const [px, py] = POCKETS[chosen.pocket_idx];
-
-        // Ghost ball position (where cue must contact)
+        // Aim direction (for ghost ball calculation) always uses the
+        // shot's aim_point — for banks that's the virtual pocket, which
+        // is the correct cue-contact direction.
+        const aim = chosen.aim_point || POCKETS[chosen.pocket_idx];
+        const px = aim[0], py = aim[1];
         const bpx = px - chosenBall.x, bpy = py - chosenBall.y;
         const bpm = Math.hypot(bpx, bpy);
         let ghostX, ghostY;
@@ -346,10 +359,18 @@ function drawLegalShotLines(shots, balls, cue) {
             ctx.setLineDash([]);
         }
 
-        // Ball-to-pocket line (solid gold)
+        // Ball-to-pocket line (solid gold). Banks render as 2 segments
+        // (ball → reflection → real pocket); straight shots draw to aim.
         ctx.beginPath();
         ctx.moveTo(tx(chosenBall.x), ty(chosenBall.y));
-        ctx.lineTo(tx(px), ty(py));
+        if (chosen.is_bank && chosen.reflection_point) {
+            const [rx, ry] = chosen.reflection_point;
+            const [pktX, pktY] = POCKETS[chosen.pocket_idx];
+            ctx.lineTo(tx(rx), ty(ry));
+            ctx.lineTo(tx(pktX), ty(pktY));
+        } else {
+            ctx.lineTo(tx(px), ty(py));
+        }
         ctx.strokeStyle = '#f3c77a'; ctx.lineWidth = 2; ctx.stroke();
 
         // Highlight ring on target ball
@@ -357,9 +378,11 @@ function drawLegalShotLines(shots, balls, cue) {
         ctx.arc(tx(chosenBall.x), ty(chosenBall.y), BALL_R*scaleX+4, 0, Math.PI*2);
         ctx.strokeStyle = '#f3c77a'; ctx.lineWidth = 2; ctx.stroke();
 
-        // Pocket ring
-        const pr = ((px===TABLE_L/2) ? 2.75 : 2.5) * scaleX;
-        ctx.beginPath(); ctx.arc(tx(px), ty(py), pr+6, 0, Math.PI*2);
+        // Pocket ring — anchor at the actual pocket center (aim point sits
+        // on the cushion-back chord, not at the pocket itself)
+        const [pocketX, pocketY] = POCKETS[chosen.pocket_idx];
+        const pr = ((pocketX===TABLE_L/2) ? 2.75 : 2.5) * scaleX;
+        ctx.beginPath(); ctx.arc(tx(pocketX), ty(pocketY), pr+6, 0, Math.PI*2);
         ctx.strokeStyle = '#f3c77a'; ctx.lineWidth = 2; ctx.stroke();
     }
 
@@ -371,9 +394,19 @@ function drawLegalShotLines(shots, balls, cue) {
         if (s.prob == null) continue;
         const ball = balls.find(b => b.id === s.ball_id);
         if (!ball) continue;
-        const [px,py] = POCKETS[s.pocket_idx];
-        const lx = tx(ball.x + 0.35*(px-ball.x));
-        const ly = ty(ball.y + 0.35*(py-ball.y));
+        // For banks, anchor label near the reflection point (rail bounce);
+        // for direct shots, partway along ball→aim line.
+        let tx0, ty0;
+        if (s.is_bank && s.reflection_point) {
+            tx0 = ball.x + 0.5*(s.reflection_point[0]-ball.x);
+            ty0 = ball.y + 0.5*(s.reflection_point[1]-ball.y);
+        } else {
+            const aim = s.aim_point || POCKETS[s.pocket_idx];
+            tx0 = ball.x + 0.35*(aim[0]-ball.x);
+            ty0 = ball.y + 0.35*(aim[1]-ball.y);
+        }
+        const lx = tx(tx0);
+        const ly = ty(ty0);
         const txt = s.prob >= 0.10 ? s.prob.toFixed(2) : s.prob.toFixed(3);
         const isChosen = (i === chosenIdx);
         ctx.fillStyle = isChosen ? '#f3c77a' : '#f4ecd8';
