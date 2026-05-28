@@ -308,7 +308,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     p = argparse.ArgumentParser(description='8-ball AI vs AI demo server')
     p.add_argument('--ckpt',
-                   default=str(HERE / 'checkpoints' / 'eight_ball_8ball_v1_best.pt'))
+                   default=str(HERE / 'checkpoints' / 'eight_ball_8ball_v4_best.pt'))
     p.add_argument('--port', type=int, default=8002)
     p.add_argument('--device', default='cpu')
     p.add_argument('--embed_dim', type=int, default=128)
