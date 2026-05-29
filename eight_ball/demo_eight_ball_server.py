@@ -242,6 +242,10 @@ def handle_next_shot(payload):
         'player': player,
         'called_id': shot.ball_id,
         'called_pocket': shot.pocket_idx,
+        'is_kick': bool(getattr(shot, 'is_kick', False)),
+        'reflection_point': (
+            [shot.reflection_point[0], shot.reflection_point[1]]
+            if getattr(shot, 'reflection_point', None) is not None else None),
         'aim_deg': aim_deg,
         'force': info.get('force', 0),
         'spin_factor': info.get('spin', 0),

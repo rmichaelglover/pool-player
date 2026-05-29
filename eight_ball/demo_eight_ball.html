@@ -448,9 +448,28 @@ function drawLegalShotLines(shots, balls, cue) {
     ctx.restore();
 }
 
-function highlightCall(calledId, calledPocketIdx, aimDeg, state) {
+function highlightCall(calledId, calledPocketIdx, aimDeg, state, isKick, reflectionPoint) {
     if (!state) return;
     const BR = BALL_R * scaleX;
+
+    // Kick: cue banks off a rail to reach the target ball. Render the bounced
+    // path (cue -> reflection -> ball) and skip the pocket line/ring, matching
+    // the preview. Without this, the pocket_idx>=0 branch below would draw a
+    // bogus straight cut to the ball's nearest pocket.
+    if (isKick && reflectionPoint) {
+        const b = state.balls.find(o => o.id === calledId);
+        ctx.beginPath(); ctx.setLineDash([5,4]);
+        ctx.moveTo(tx(state.cue[0]), ty(state.cue[1]));
+        ctx.lineTo(tx(reflectionPoint[0]), ty(reflectionPoint[1]));
+        if (b) ctx.lineTo(tx(b.x), ty(b.y));
+        ctx.strokeStyle = '#7dd3fc'; ctx.lineWidth = 1.5; ctx.stroke();
+        ctx.setLineDash([]);
+        if (b) {
+            ctx.beginPath(); ctx.arc(tx(b.x), ty(b.y), BR+4, 0, Math.PI*2);
+            ctx.strokeStyle = '#f3c77a'; ctx.lineWidth = 2; ctx.stroke();
+        }
+        return;
+    }
 
     // Aim line from cue
     if (aimDeg != null) {
@@ -710,7 +729,8 @@ async function nextShot() {
 
     // Show aim overlay on pre-shot state
     render(currentState.cue, currentState.balls);
-    highlightCall(data.called_id, data.called_pocket, data.aim_deg, currentState);
+    highlightCall(data.called_id, data.called_pocket, data.aim_deg, currentState,
+                  data.is_kick, data.reflection_point);
 
     setTimeout(() => {
         animateTrajectory(data.trajectory, data.ball_ids_order, data.pocketed_ids, async () => {
