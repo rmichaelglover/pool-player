@@ -467,7 +467,7 @@ function drawLegalShotLines(shots, balls, cue) {
     ctx.restore();
 }
 
-function highlightCall(calledId, calledPocketIdx, aimDeg, state, isKick, reflectionPoint) {
+function highlightCall(calledId, calledPocketIdx, aimDeg, state, isKick, reflectionPoint, isBank) {
     if (!state) return;
     const BR = BALL_R * scaleX;
 
@@ -485,6 +485,49 @@ function highlightCall(calledId, calledPocketIdx, aimDeg, state, isKick, reflect
         ctx.setLineDash([]);
         if (b) {
             ctx.beginPath(); ctx.arc(tx(b.x), ty(b.y), BR+4, 0, Math.PI*2);
+            ctx.strokeStyle = '#f3c77a'; ctx.lineWidth = 2; ctx.stroke();
+        }
+        return;
+    }
+
+    // Bank: the OBJECT ball banks off a rail into the pocket. Its initial travel
+    // is toward the reflection point (which lies on the ball -> virtual-pocket
+    // line), NOT straight at the real pocket. Route the ghost and the gold path
+    // through the reflection point, matching the pre-shot preview. Without this,
+    // the calledPocketIdx>=0 branches below would draw a bogus straight cut
+    // through the rail to the real pocket.
+    if (isBank && reflectionPoint) {
+        const b = state.balls.find(o => o.id === calledId);
+        if (b) {
+            // Ghost: behind the ball along the ball -> reflection-point direction.
+            const bpx = reflectionPoint[0] - b.x, bpy = reflectionPoint[1] - b.y;
+            const bpm = Math.hypot(bpx, bpy);
+            let gx = b.x, gy = b.y;
+            if (bpm > 1e-6) { gx = b.x - 2*BALL_R*bpx/bpm; gy = b.y - 2*BALL_R*bpy/bpm; }
+            ctx.beginPath(); ctx.setLineDash([5,4]);
+            ctx.moveTo(tx(state.cue[0]), ty(state.cue[1])); ctx.lineTo(tx(gx), ty(gy));
+            ctx.strokeStyle = '#7dd3fc'; ctx.lineWidth = 1.5; ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.beginPath(); ctx.arc(tx(gx), ty(gy), BALL_R*scaleX, 0, Math.PI*2);
+            ctx.strokeStyle = 'rgba(125,211,252,0.7)';
+            ctx.setLineDash([3,3]); ctx.lineWidth = 1; ctx.stroke();
+            ctx.setLineDash([]);
+            // Gold path: ball -> reflection -> real pocket
+            ctx.beginPath();
+            ctx.moveTo(tx(b.x), ty(b.y));
+            ctx.lineTo(tx(reflectionPoint[0]), ty(reflectionPoint[1]));
+            if (calledPocketIdx >= 0) {
+                const [px,py] = POCKETS[calledPocketIdx];
+                ctx.lineTo(tx(px), ty(py));
+            }
+            ctx.strokeStyle = '#f3c77a'; ctx.lineWidth = 2; ctx.stroke();
+            ctx.beginPath(); ctx.arc(tx(b.x), ty(b.y), BR+4, 0, Math.PI*2);
+            ctx.strokeStyle = '#f3c77a'; ctx.lineWidth = 2; ctx.stroke();
+        }
+        if (calledPocketIdx >= 0) {
+            const [px,py] = POCKETS[calledPocketIdx];
+            const pr = ((px===TABLE_L/2) ? 2.75 : 2.5) * scaleX;
+            ctx.beginPath(); ctx.arc(tx(px), ty(py), pr+6, 0, Math.PI*2);
             ctx.strokeStyle = '#f3c77a'; ctx.lineWidth = 2; ctx.stroke();
         }
         return;
@@ -749,7 +792,7 @@ async function nextShot() {
     // Show aim overlay on pre-shot state
     render(currentState.cue, currentState.balls);
     highlightCall(data.called_id, data.called_pocket, data.aim_deg, currentState,
-                  data.is_kick, data.reflection_point);
+                  data.is_kick, data.reflection_point, data.is_bank);
 
     setTimeout(() => {
         animateTrajectory(data.trajectory, data.ball_ids_order, data.pocketed_ids, async () => {
