@@ -294,6 +294,7 @@ def handle_next_shot(payload):
         'called_id': shot.ball_id,
         'called_pocket': shot.pocket_idx,
         'is_kick': bool(getattr(shot, 'is_kick', False)),
+        'is_bank': bool(getattr(shot, 'is_bank', False)),
         'reflection_point': (
             [shot.reflection_point[0], shot.reflection_point[1]]
             if getattr(shot, 'reflection_point', None) is not None else None),

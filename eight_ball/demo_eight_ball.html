@@ -7,10 +7,11 @@
 body { background: #1a1d24; color: #e6e9ef; font-family: system-ui, sans-serif; margin: 16px; }
 h1 { color: #f3c77a; font-size: 20px; margin-bottom: 4px; }
 .sub { color: #9aa0aa; font-size: 12px; margin-bottom: 16px; }
-.layout { display: flex; gap: 20px; align-items: flex-start; }
-.left { flex: 0 0 auto; }
-.right { flex: 1; max-width: 460px; }
+.layout { display: flex; gap: 20px; align-items: flex-start; justify-content: space-between; }
+.left { flex: 1 1 auto; min-width: 0; }
+.right { flex: 0 0 440px; }
 canvas { background: #0e1014; border: 1px solid #2a2e38; border-radius: 4px; }
+canvas#table { display: block; }
 .controls { background: #222632; padding: 14px; border-radius: 4px; margin-bottom: 14px; }
 button { background: #bb4a4a; color: white; border: 0; padding: 8px 20px; font-size: 14px;
          border-radius: 4px; cursor: pointer; margin-right: 8px; }
@@ -143,6 +144,24 @@ function recomputeScale() {
 function tx(x) { return offX + x*scaleX; }
 function ty(y) { return offY + y*scaleY; }
 
+// Grow the table canvas to fill the area freed up by pinning the status panel
+// to the far right. Width is the viewport minus body margins, the flex gap and
+// the fixed right column; height keeps the full-table (slate+overhang) aspect
+// ratio. Buffer pixels == CSS pixels so the render stays crisp.
+const RIGHT_COL_W = 440, LAYOUT_GAP = 20;
+function resizeCanvas() {
+    const bodyMargin = parseFloat(getComputedStyle(document.body).marginLeft) || 16;
+    const fw = TABLE_L + 2*SLATE_OVERHANG, fh = TABLE_W + 2*SLATE_OVERHANG;
+    let w = window.innerWidth - 2*bodyMargin - LAYOUT_GAP - RIGHT_COL_W;
+    w = Math.max(360, w);
+    let h = Math.round(w * fh / fw);
+    const maxH = window.innerHeight - 180;
+    if (maxH > 200 && h > maxH) { h = maxH; w = Math.round(h * fw / fh); }
+    canvas.width = Math.round(w);
+    canvas.height = h;
+    recomputeScale();
+}
+
 async function fetchGeometry() {
     try {
         const r = await fetch('/geometry');
@@ -152,7 +171,7 @@ async function fetchGeometry() {
         BALL_R = GEOM.ball_r;
         SLATE_OVERHANG = GEOM.slate_overhang; CUSH_DEPTH = GEOM.cush_depth;
         POCKETS = GEOM.pockets;
-        recomputeScale();
+        resizeCanvas();
     } catch(e) { console.warn('geometry fetch failed', e); }
 }
 
@@ -448,7 +467,7 @@ function drawLegalShotLines(shots, balls, cue) {
     ctx.restore();
 }
 
-function highlightCall(calledId, calledPocketIdx, aimDeg, state, isKick, reflectionPoint) {
+function highlightCall(calledId, calledPocketIdx, aimDeg, state, isKick, reflectionPoint, isBank) {
     if (!state) return;
     const BR = BALL_R * scaleX;
 
@@ -466,6 +485,49 @@ function highlightCall(calledId, calledPocketIdx, aimDeg, state, isKick, reflect
         ctx.setLineDash([]);
         if (b) {
             ctx.beginPath(); ctx.arc(tx(b.x), ty(b.y), BR+4, 0, Math.PI*2);
+            ctx.strokeStyle = '#f3c77a'; ctx.lineWidth = 2; ctx.stroke();
+        }
+        return;
+    }
+
+    // Bank: the OBJECT ball banks off a rail into the pocket. Its initial travel
+    // is toward the reflection point (which lies on the ball -> virtual-pocket
+    // line), NOT straight at the real pocket. Route the ghost and the gold path
+    // through the reflection point, matching the pre-shot preview. Without this,
+    // the calledPocketIdx>=0 branches below would draw a bogus straight cut
+    // through the rail to the real pocket.
+    if (isBank && reflectionPoint) {
+        const b = state.balls.find(o => o.id === calledId);
+        if (b) {
+            // Ghost: behind the ball along the ball -> reflection-point direction.
+            const bpx = reflectionPoint[0] - b.x, bpy = reflectionPoint[1] - b.y;
+            const bpm = Math.hypot(bpx, bpy);
+            let gx = b.x, gy = b.y;
+            if (bpm > 1e-6) { gx = b.x - 2*BALL_R*bpx/bpm; gy = b.y - 2*BALL_R*bpy/bpm; }
+            ctx.beginPath(); ctx.setLineDash([5,4]);
+            ctx.moveTo(tx(state.cue[0]), ty(state.cue[1])); ctx.lineTo(tx(gx), ty(gy));
+            ctx.strokeStyle = '#7dd3fc'; ctx.lineWidth = 1.5; ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.beginPath(); ctx.arc(tx(gx), ty(gy), BALL_R*scaleX, 0, Math.PI*2);
+            ctx.strokeStyle = 'rgba(125,211,252,0.7)';
+            ctx.setLineDash([3,3]); ctx.lineWidth = 1; ctx.stroke();
+            ctx.setLineDash([]);
+            // Gold path: ball -> reflection -> real pocket
+            ctx.beginPath();
+            ctx.moveTo(tx(b.x), ty(b.y));
+            ctx.lineTo(tx(reflectionPoint[0]), ty(reflectionPoint[1]));
+            if (calledPocketIdx >= 0) {
+                const [px,py] = POCKETS[calledPocketIdx];
+                ctx.lineTo(tx(px), ty(py));
+            }
+            ctx.strokeStyle = '#f3c77a'; ctx.lineWidth = 2; ctx.stroke();
+            ctx.beginPath(); ctx.arc(tx(b.x), ty(b.y), BR+4, 0, Math.PI*2);
+            ctx.strokeStyle = '#f3c77a'; ctx.lineWidth = 2; ctx.stroke();
+        }
+        if (calledPocketIdx >= 0) {
+            const [px,py] = POCKETS[calledPocketIdx];
+            const pr = ((px===TABLE_L/2) ? 2.75 : 2.5) * scaleX;
+            ctx.beginPath(); ctx.arc(tx(px), ty(py), pr+6, 0, Math.PI*2);
             ctx.strokeStyle = '#f3c77a'; ctx.lineWidth = 2; ctx.stroke();
         }
         return;
@@ -623,7 +685,7 @@ async function setupGame() {
     });
     const data = await r.json();
     TABLE_L = data.table_length; TABLE_W = data.table_width; BALL_R = data.ball_radius;
-    recomputeScale();
+    resizeCanvas();
     currentState = {cue: data.cue, balls: data.balls};
     render(currentState.cue, currentState.balls);
     document.getElementById('ballsOnTable').textContent = data.balls.length;
@@ -730,7 +792,7 @@ async function nextShot() {
     // Show aim overlay on pre-shot state
     render(currentState.cue, currentState.balls);
     highlightCall(data.called_id, data.called_pocket, data.aim_deg, currentState,
-                  data.is_kick, data.reflection_point);
+                  data.is_kick, data.reflection_point, data.is_bank);
 
     setTimeout(() => {
         animateTrajectory(data.trajectory, data.ball_ids_order, data.pocketed_ids, async () => {
@@ -843,8 +905,13 @@ document.querySelectorAll('input[name="mode"]').forEach(el => {
 });
 
 // ── Init ──────────────────────────────────────────────────────────────────
-recomputeScale();
+resizeCanvas();
 drawTable();
+window.addEventListener('resize', () => {
+    resizeCanvas();
+    if (currentState) render(currentState.cue, currentState.balls);
+    else drawTable();
+});
 (async () => {
     await fetchGeometry();
     drawTable();
