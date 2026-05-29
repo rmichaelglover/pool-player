@@ -24,6 +24,12 @@
 #define VT        0.10     /* velocity threshold for stopping */
 #define SLIP_VT   0.05     /* slip velocity threshold for rolling transition */
 #define MAX_STEPS 3000     /* 10 seconds of sim time */
+#define FROZEN_SPEED_SQ 100.0  /* a ball moving faster than 10 in/s is NOT
+                                * "frozen" — it must bounce off rails normally,
+                                * so the rail-frozen constraint below is gated
+                                * on the pre-collision speed (else a fast cue
+                                * hugging a rail slides along it instead of
+                                * bouncing when it grazes a ball). */
 #define EPS_FROZEN 0.10    /* a ball within this gap of a rail is treated as
                               "frozen" — at collision, the rail provides an
                               instantaneous normal reaction that kills any
@@ -333,17 +339,28 @@ int simulate_shot(
                     any_col = 1;
                     int is_cue = (i == 0 || j == 0);
 
+                    /* Pre-collision speeds: the rail-frozen constraint below
+                     * must apply ONLY to a genuinely resting (frozen) ball, not
+                     * to a fast mover, so capture speed before the impulse. */
+                    double pre_sp_i = b[i].vx*b[i].vx + b[i].vy*b[i].vy;
+                    double pre_sp_j = b[j].vx*b[j].vx + b[j].vy*b[j].vy;
+
                     double jj = (1.0 + BALL_R) * dvn / 2.0;
                     b[i].vx -= jj*nx;  b[i].vy -= jj*ny;
                     b[j].vx += jj*nx;  b[j].vy += jj*ny;
 
-                    /* 3-body constraint: if either ball is rail-frozen, the
-                     * rail absorbs any inward impulse (instantaneous reaction).
-                     * Project the post-collision velocity onto the rail-parallel
-                     * direction so the ball travels ALONG the rail rather than
-                     * bouncing off it at an angle. */
+                    /* 3-body constraint: if a ball is rail-frozen, the rail
+                     * absorbs any inward impulse (instantaneous reaction), so
+                     * the ball travels ALONG the rail rather than bouncing off
+                     * it at an angle. Gated on pre-collision speed: a moving
+                     * ball (especially the cue mid-shot) is NOT frozen and must
+                     * bounce off the rail normally — without this gate, a cue
+                     * hugging a rail slides along it instead of bouncing when it
+                     * grazes a nearby ball. */
                     for (int k = 0; k < 2; k++) {
                         int idx = (k == 0) ? i : j;
+                        double pre_sp = (idx == i) ? pre_sp_i : pre_sp_j;
+                        if (pre_sp > FROZEN_SPEED_SQ) continue;
                         if (b[idx].y < R + EPS_FROZEN && b[idx].vy < 0)
                             b[idx].vy = 0;
                         if (b[idx].y > TW - R - EPS_FROZEN && b[idx].vy > 0)
