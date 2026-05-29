@@ -95,6 +95,30 @@ def game_state_dict(env):
     }
 
 
+_EMBED_LOG = HERE / 'rail_embed_captures.jsonl'
+
+
+def _rail_embed_report(cue, balls):
+    """Flag any ball whose center has crossed PAST a cushion line — a
+    physically impossible resting state. Returns a list of {who,x,y,pen}
+    (pen = inches past the rail). Ignores the pocket corner/side gaps where
+    the rail is genuinely open. Table is TL x TW with ball radius R."""
+    EPS = 0.02
+    POCKET_CLEAR = 5.0  # rail is open near pockets; don't flag those
+    items = [('cue', cue[0], cue[1])]
+    items += [(str(b), p[0], p[1]) for b, p in balls.items()]
+    out = []
+    for label, x, y in items:
+        pen = max(R - x, R - y, x - (TABLE_LENGTH - R), y - (TABLE_WIDTH - R))
+        if pen <= EPS:
+            continue
+        if any(math.hypot(x - px, y - py) < POCKET_CLEAR for px, py in POCKETS):
+            continue
+        out.append({'who': label, 'x': round(x, 3), 'y': round(y, 3),
+                    'pen': round(pen, 3)})
+    return out
+
+
 def obs_to_batch(obs, device):
     return {
         'balls': torch.from_numpy(obs.balls).unsqueeze(0).to(device),
@@ -224,6 +248,10 @@ def handle_next_shot(payload):
     else:
         shot = min(obs.shot_meta, key=lambda s: s.difficulty)
 
+    # Snapshot pre-shot state so a rail-embed glitch can be reproduced exactly.
+    cue_before = list(env.cue)
+    balls_before = {bid: list(pos) for bid, pos in env.balls.items()}
+
     obs_next, reward, done, info = env.step(
         action_idx_val, force_raw_val, spin_raw_val, obs,
         record_trajectory=True, traj_max_frames=600,
@@ -231,6 +259,29 @@ def handle_next_shot(payload):
 
     decision_ms = (time.time() - t0) * 1000
     aim_deg = math.degrees(info.get('aim_angle', 0))
+
+    # Capture any physically-impossible rail embedding with full repro inputs.
+    embed = _rail_embed_report(env.cue, env.balls)
+    if embed:
+        try:
+            with open(_EMBED_LOG, 'a') as fh:
+                fh.write(json.dumps({
+                    'session_id': session_id,
+                    'shot_num': env.total_shots,
+                    'cue_before': cue_before, 'balls_before': balls_before,
+                    'action_idx': action_idx_val,
+                    'force_raw': force_raw_val, 'spin_raw': spin_raw_val,
+                    'aim_deg': aim_deg,
+                    'force': info.get('force'), 'spin': info.get('spin'),
+                    'is_kick': bool(getattr(shot, 'is_kick', False)),
+                    'cue_after': list(env.cue),
+                    'balls_after': {b: list(p) for b, p in env.balls.items()},
+                    'embedded': embed,
+                }) + '\n')
+            print(f'[RAIL EMBED] session={session_id} '
+                  f'shot={env.total_shots} {embed}')
+        except Exception:
+            traceback.print_exc()
 
     return {
         'trajectory': info.get('trajectory', []),
