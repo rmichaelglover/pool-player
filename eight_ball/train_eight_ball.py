@@ -167,6 +167,7 @@ class VecEightBall:
 def train_eight_ball(num_envs=8, device_name='cpu', max_iters=1000,
                      tag='8ball_baseline', lr=1e-4,
                      steps_per_iter=64, entropy_coef=0.01,
+                     entropy_coef_final=None,
                      log_std_min=-2.5, embed_dim=128, num_heads=8,
                      num_layers=4, warm_start=None, env_kwargs=None,
                      gamma=0.999, gae_lambda=0.95):
@@ -207,6 +208,12 @@ def train_eight_ball(num_envs=8, device_name='cpu', max_iters=1000,
     recent_fouls = deque(maxlen=2000)
 
     for iteration in range(max_iters):
+        # Linear entropy-coefficient anneal (sharpen the policy over training)
+        if entropy_coef_final is not None and max_iters > 1:
+            frac = iteration / (max_iters - 1)
+            cur_ent_coef = entropy_coef + frac * (entropy_coef_final - entropy_coef)
+        else:
+            cur_ent_coef = entropy_coef
         buffer = EightBallBuffer(steps_per_iter * num_envs)
         iter_games = 0
         iter_wins = {0: 0, 1: 0, None: 0}
@@ -298,7 +305,7 @@ def train_eight_ball(num_envs=8, device_name='cpu', max_iters=1000,
                 surr2 = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps) * b_adv
                 pg_loss = -torch.min(surr1, surr2).mean()
 
-                loss = pg_loss + value_coef * v_loss - entropy_coef * entropy.mean()
+                loss = pg_loss + value_coef * v_loss - cur_ent_coef * entropy.mean()
                 opt.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(net.parameters(), 0.5)
@@ -327,7 +334,7 @@ def train_eight_ball(num_envs=8, device_name='cpu', max_iters=1000,
                   f'W0={iter_wins[0]} W1={iter_wins[1]} D={iter_wins.get(None,0)} | '
                   f'AvgLen={avg_len:5.1f} FoulRate={foul_rate:.2f} '
                   f'Plc={iter_placements}({avg_plc_r:+.3f}) | '
-                  f'PG={pg:.4f} VL={vl:.4f} Ent={ent:.3f} | {elapsed:.0f}s',
+                  f'PG={pg:.4f} VL={vl:.4f} Ent={ent:.3f} EntC={cur_ent_coef:.4f} | {elapsed:.0f}s',
                   flush=True)
 
             if n_updates > 0 and win_rate > best_win_rate:
@@ -354,6 +361,12 @@ def main():
     p.add_argument('--lr', type=float, default=1e-4)
     p.add_argument('--gamma', type=float, default=0.999)
     p.add_argument('--entropy_coef', type=float, default=0.01)
+    p.add_argument('--entropy_coef_final', type=float, default=None,
+                   help='If set, linearly anneal entropy_coef to this over training')
+    p.add_argument('--log_std_min', type=float, default=-2.5,
+                   help='Floor on action log-std; lower = tighter possible aim')
+    p.add_argument('--shape_reward_weight', type=float, default=0.05,
+                   help='Weight on leave-quality (position) shaping reward')
     p.add_argument('--warm_start', type=str, default=None)
     p.add_argument('--device', type=str, default='cpu')
     p.add_argument('--aim_noise_deg', type=float, default=0.0)
@@ -365,11 +378,14 @@ def main():
         aim_noise_deg=args.aim_noise_deg,
         force_noise_pct=args.force_noise_pct,
         spin_noise=args.spin_noise,
+        shape_reward_weight=args.shape_reward_weight,
     )
     train_eight_ball(
         num_envs=args.envs, device_name=args.device, max_iters=args.iters,
         tag=args.tag, lr=args.lr, steps_per_iter=args.steps,
-        entropy_coef=args.entropy_coef, warm_start=args.warm_start,
+        entropy_coef=args.entropy_coef,
+        entropy_coef_final=args.entropy_coef_final,
+        log_std_min=args.log_std_min, warm_start=args.warm_start,
         env_kwargs=env_kwargs, gamma=args.gamma,
     )
 
