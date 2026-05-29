@@ -38,12 +38,21 @@ from eight_ball_net import (EightBallNet, EightBallObs, MAX_SHOTS,
                             TABLE_LENGTH, TABLE_WIDTH,
                             decode_force, decode_spin)
 from shot_enumerator import POCKETS, POCKET_NAMES, R
+from shot_search_eight_ball import shot_search_eight_ball
 
 _net = None
 _device = None
 _sessions: dict = {}
 _histories: dict = {}
 HISTORY_MAX = 50
+
+# Depth-1 shot-search config (AlphaZero-style: net = prior, value = critic,
+# physics = planner). When _use_search is False the server falls back to the
+# net's raw argmax shot with its mean force/spin.
+_use_search = True
+_search_k = 8
+_search_m = 4
+_search_gamma = 0.99
 
 
 def load_net(ckpt_path, embed_dim=128, num_heads=8, num_layers=4,
@@ -190,11 +199,30 @@ def handle_next_shot(payload):
         scores, f_means, s_means, _, value, _ = _net.forward(**batch)
 
     n_legal = len(obs.shot_meta)
-    action_idx_val = int(scores[0, :n_legal].argmax().item())
-    force_raw_val = float(f_means[0, action_idx_val].item())
-    spin_raw_val = float(s_means[0, action_idx_val].item())
+    if _use_search:
+        # Depth-1 search picks the action with the best simulated Q. It may
+        # return the safety action (action_idx == n_legal), in which case the
+        # env aims softly at the easiest legal shot itself.
+        action = shot_search_eight_ball(
+            _net, env, obs, K_shots=_search_k, M_per_shot=_search_m,
+            gamma=_search_gamma, device=_device)
+        if action is None:
+            action_idx_val = int(scores[0, :n_legal].argmax().item())
+            force_raw_val = float(f_means[0, action_idx_val].item())
+            spin_raw_val = float(s_means[0, action_idx_val].item())
+        else:
+            action_idx_val, force_raw_val, spin_raw_val = action
+    else:
+        action_idx_val = int(scores[0, :n_legal].argmax().item())
+        force_raw_val = float(f_means[0, action_idx_val].item())
+        spin_raw_val = float(s_means[0, action_idx_val].item())
 
-    shot = obs.shot_meta[action_idx_val]
+    # For display: the safety slot (idx == n_legal) has no shot_meta entry, so
+    # report the easiest legal shot the env will actually aim at.
+    if action_idx_val < n_legal:
+        shot = obs.shot_meta[action_idx_val]
+    else:
+        shot = min(obs.shot_meta, key=lambda s: s.difficulty)
 
     obs_next, reward, done, info = env.step(
         action_idx_val, force_raw_val, spin_raw_val, obs,
@@ -444,19 +472,50 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     p = argparse.ArgumentParser(description='8-ball AI vs AI demo server')
     p.add_argument('--ckpt',
-                   default=str(HERE / 'checkpoints' / 'eight_ball_8ball_v4_best.pt'))
+                   default=str(HERE / 'checkpoints' / 'eight_ball_8ball_v6_distill_final.pt'))
     p.add_argument('--port', type=int, default=8002)
     p.add_argument('--device', default='cpu')
     p.add_argument('--embed_dim', type=int, default=128)
     p.add_argument('--num_heads', type=int, default=8)
     p.add_argument('--num_layers', type=int, default=4)
+    # Tri-state: --no_search forces off, --search forces on, neither => auto
+    # (search OFF for search-distilled checkpoints, which already bake search
+    # into the policy weights; ON otherwise).
+    p.add_argument('--no_search', dest='use_search', action='store_const',
+                   const=False, default=None,
+                   help='Force-disable depth-1 search; use the net argmax instead')
+    p.add_argument('--search', dest='use_search', action='store_const', const=True,
+                   help='Force-enable depth-1 search even for distilled checkpoints')
+    p.add_argument('--search_k', type=int, default=8,
+                   help='Top-K shots considered by search')
+    p.add_argument('--search_m', type=int, default=4,
+                   help='Force/spin samples per shot in search')
+    p.add_argument('--gamma', type=float, default=0.99,
+                   help='Discount on next-state value in search Q')
     args = p.parse_args()
+
+    global _use_search, _search_k, _search_m, _search_gamma
+    if args.use_search is None:
+        # Auto: distilled checkpoints bake search into the weights, so running
+        # inference-time search again is redundant and can degrade the choice.
+        is_distilled = 'distill' in Path(args.ckpt).name.lower()
+        _use_search = not is_distilled
+        if is_distilled:
+            print('Distilled checkpoint detected -> search OFF by default '
+                  '(pass --search to override)')
+    else:
+        _use_search = args.use_search
+    _search_k = args.search_k
+    _search_m = args.search_m
+    _search_gamma = args.gamma
 
     load_net(args.ckpt, embed_dim=args.embed_dim, num_heads=args.num_heads,
              num_layers=args.num_layers, device=args.device)
 
     srv = ThreadingHTTPServer(('0.0.0.0', args.port), Handler)
-    print(f'8-ball demo at http://localhost:{args.port}/')
+    mode = (f'search K={_search_k} M={_search_m} γ={_search_gamma}'
+            if _use_search else 'raw argmax (search OFF)')
+    print(f'8-ball demo at http://localhost:{args.port}/  [{mode}]')
     srv.serve_forever()
 
 
