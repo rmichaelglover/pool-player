@@ -578,7 +578,8 @@ def handle_legal_shots(payload):
 
     # Heuristic / network modes: no per-shot probability available.
     from shot_enumerator import generate_legal_shots
-    shots = generate_legal_shots(env.cue, env.balls, max_cut_deg=80.0)
+    shots = generate_legal_shots(env.cue, env.balls, max_cut_deg=80.0,
+                                  include_banks=True)
     return {
         'shots': [
             {
