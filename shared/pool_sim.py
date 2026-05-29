@@ -27,6 +27,7 @@ _lib.simulate_shot.argtypes = [
     ctypes.c_int,                      # traj_max_frames
     ctypes.POINTER(ctypes.c_double),  # cue_path_len_out
     ctypes.POINTER(ctypes.c_int),     # cue_contacts_out
+    ctypes.POINTER(ctypes.c_int),     # first_hit_idx_out (-1 if no OB contact)
 ]
 
 # Mapping from legacy discrete spin_type → continuous spin_factor.
@@ -47,6 +48,7 @@ class ShotResult:
     cue_path_len: float = 0.0  # Cue-ball travel post-first-contact (inches)
     cue_contacts: int = 0      # Number of cue→OB ball-ball collisions
     trajectory: object = None  # Optional: np.ndarray (frames, n_balls, 2)
+    first_hit_id: object = None  # ball_id of the cue's first OB contact, or None
 
 
 def simulate_shot(cue_pos, ball_positions, cue_vx, cue_vy,
@@ -105,6 +107,7 @@ def simulate_shot(cue_pos, ball_positions, cue_vx, cue_vy,
 
     cue_path_len_c = ctypes.c_double(0.0)
     cue_contacts_c = ctypes.c_int(0)
+    first_hit_idx_c = ctypes.c_int(-1)
 
     _lib.simulate_shot(
         pos_in, n,
@@ -116,6 +119,7 @@ def simulate_shot(cue_pos, ball_positions, cue_vx, cue_vy,
         traj_ptr, traj_n_ptr, ctypes.c_int(traj_max),
         ctypes.byref(cue_path_len_c),
         ctypes.byref(cue_contacts_c),
+        ctypes.byref(first_hit_idx_c),
     )
 
     final = {}
@@ -124,6 +128,11 @@ def simulate_shot(cue_pos, ball_positions, cue_vx, cue_vy,
         final[bid] = (pos_out[i*2], pos_out[i*2+1])
         if pocketed_out[i]:
             pocketed.add(bid)
+
+    # Map the first-contact ball-array index back to its ball_id (None if the
+    # cue never touched an object ball). ball_ids[0] is the cue itself.
+    fhi = first_hit_idx_c.value
+    first_hit_id = ball_ids[fhi] if 0 <= fhi < len(ball_ids) else None
 
     trajectory = None
     if record_trajectory:
@@ -141,4 +150,5 @@ def simulate_shot(cue_pos, ball_positions, cue_vx, cue_vy,
         cue_path_len=float(cue_path_len_c.value),
         cue_contacts=int(cue_contacts_c.value),
         trajectory=trajectory,
+        first_hit_id=first_hit_id,
     )

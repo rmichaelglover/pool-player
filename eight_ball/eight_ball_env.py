@@ -27,7 +27,7 @@ from shot_enumerator import (generate_legal_shots, generate_defensive_shots,
                               POCKETS, POCKET_NAMES,
                               POCKET_RADII, R, LegalShot)
 from rack_geometry import RACK_APEX, RACK_POSITIONS
-from shot_utils import first_ball_struck, pocket_index_of, HEAD_SPOT
+from shot_utils import pocket_index_of, HEAD_SPOT
 from eight_ball_net import (EightBallObs, MAX_BALLS, MAX_POCKETS, MAX_SHOTS,
                             GAME_STATE_DIM, TABLE_LENGTH, TABLE_WIDTH,
                             GROUP_CUE, GROUP_MINE, GROUP_NEUTRAL,
@@ -428,9 +428,6 @@ class EightBallEnv:
         self.ball_in_hand = False
         self.ball_in_hand_behind_head = False
 
-        # Determine first ball struck (for foul detection)
-        first_hit_id, _ = first_ball_struck(self.cue, aim, self.balls)
-
         # Simulate
         balls_in_sim = {bid: tuple(pos) for bid, pos in self.balls.items()}
         ordered_ids = [0] + sorted(balls_in_sim.keys())
@@ -441,6 +438,11 @@ class EightBallEnv:
             record_trajectory=record_trajectory,
             traj_max_frames=traj_max_frames,
         )
+
+        # First ball struck for foul detection. Use the TRUE first contact from
+        # the physics sim, not a straight cue->aim ray — the latter is wrong for
+        # kick shots (cue banks off a rail first) and caroms.
+        first_hit_id = result.first_hit_id
         pocketed_ids = set(result.pocketed_ids)
         scratch = result.cue_scratched
 

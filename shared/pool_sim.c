@@ -207,7 +207,13 @@ int simulate_shot(
      * |v|*DT each step while not pocketed) and writes the result. */
     double *traj_out, int *traj_n_out, int traj_max_frames,
     double *cue_path_len_out,
-    int *cue_contacts_out)
+    int *cue_contacts_out,
+    /* Optional: if non-NULL, receives the ball-array index (matching pos_in
+     * order) of the FIRST object ball the cue ball contacts, or -1 if the
+     * cue never touches an object ball. Used for foul detection — this is
+     * the true first contact from the physics, so it is correct for kicks
+     * and caroms where a straight cue->aim ray would be wrong. */
+    int *first_hit_idx_out)
 {
     const int TRAJ_STRIDE = 6;  /* 300 Hz / 6 = 50 frames per second */
     int traj_n = 0;
@@ -218,6 +224,7 @@ int simulate_shot(
     Ball b[MAX_BALLS];
     *hit_ball = 0;
     *hit_rail = 0;
+    int first_hit_idx = -1;
 
     for (int i = 0; i < n_balls; i++) {
         b[i].x  = pos_in[i*2];
@@ -349,6 +356,7 @@ int simulate_shot(
 
                     if (is_cue) {
                         *hit_ball = 1;
+                        if (first_hit_idx < 0) first_hit_idx = (i == 0) ? j : i;
                         cue_contacts++;
                         /* Spin transfers naturally through the friction model —
                          * no need to apply spin impulse at collision.
@@ -480,6 +488,7 @@ int simulate_shot(
     if (traj_n_out != NULL) *traj_n_out = traj_n;
     if (cue_path_len_out != NULL) *cue_path_len_out = cue_path_len;
     if (cue_contacts_out != NULL) *cue_contacts_out = cue_contacts;
+    if (first_hit_idx_out != NULL) *first_hit_idx_out = first_hit_idx;
 
     for (int i = 0; i < n_balls; i++) {
         pos_out[i*2]   = b[i].x;
