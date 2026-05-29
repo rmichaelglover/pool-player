@@ -7,10 +7,11 @@
 body { background: #1a1d24; color: #e6e9ef; font-family: system-ui, sans-serif; margin: 16px; }
 h1 { color: #f3c77a; font-size: 20px; margin-bottom: 4px; }
 .sub { color: #9aa0aa; font-size: 12px; margin-bottom: 16px; }
-.layout { display: flex; gap: 20px; align-items: flex-start; }
-.left { flex: 0 0 auto; }
-.right { flex: 1; max-width: 460px; }
+.layout { display: flex; gap: 20px; align-items: flex-start; justify-content: space-between; }
+.left { flex: 1 1 auto; min-width: 0; }
+.right { flex: 0 0 440px; }
 canvas { background: #0e1014; border: 1px solid #2a2e38; border-radius: 4px; }
+canvas#table { display: block; }
 .controls { background: #222632; padding: 14px; border-radius: 4px; margin-bottom: 14px; }
 button { background: #bb4a4a; color: white; border: 0; padding: 8px 20px; font-size: 14px;
          border-radius: 4px; cursor: pointer; margin-right: 8px; }
@@ -143,6 +144,24 @@ function recomputeScale() {
 function tx(x) { return offX + x*scaleX; }
 function ty(y) { return offY + y*scaleY; }
 
+// Grow the table canvas to fill the area freed up by pinning the status panel
+// to the far right. Width is the viewport minus body margins, the flex gap and
+// the fixed right column; height keeps the full-table (slate+overhang) aspect
+// ratio. Buffer pixels == CSS pixels so the render stays crisp.
+const RIGHT_COL_W = 440, LAYOUT_GAP = 20;
+function resizeCanvas() {
+    const bodyMargin = parseFloat(getComputedStyle(document.body).marginLeft) || 16;
+    const fw = TABLE_L + 2*SLATE_OVERHANG, fh = TABLE_W + 2*SLATE_OVERHANG;
+    let w = window.innerWidth - 2*bodyMargin - LAYOUT_GAP - RIGHT_COL_W;
+    w = Math.max(360, w);
+    let h = Math.round(w * fh / fw);
+    const maxH = window.innerHeight - 180;
+    if (maxH > 200 && h > maxH) { h = maxH; w = Math.round(h * fw / fh); }
+    canvas.width = Math.round(w);
+    canvas.height = h;
+    recomputeScale();
+}
+
 async function fetchGeometry() {
     try {
         const r = await fetch('/geometry');
@@ -152,7 +171,7 @@ async function fetchGeometry() {
         BALL_R = GEOM.ball_r;
         SLATE_OVERHANG = GEOM.slate_overhang; CUSH_DEPTH = GEOM.cush_depth;
         POCKETS = GEOM.pockets;
-        recomputeScale();
+        resizeCanvas();
     } catch(e) { console.warn('geometry fetch failed', e); }
 }
 
@@ -623,7 +642,7 @@ async function setupGame() {
     });
     const data = await r.json();
     TABLE_L = data.table_length; TABLE_W = data.table_width; BALL_R = data.ball_radius;
-    recomputeScale();
+    resizeCanvas();
     currentState = {cue: data.cue, balls: data.balls};
     render(currentState.cue, currentState.balls);
     document.getElementById('ballsOnTable').textContent = data.balls.length;
@@ -843,8 +862,13 @@ document.querySelectorAll('input[name="mode"]').forEach(el => {
 });
 
 // ── Init ──────────────────────────────────────────────────────────────────
-recomputeScale();
+resizeCanvas();
 drawTable();
+window.addEventListener('resize', () => {
+    resizeCanvas();
+    if (currentState) render(currentState.cue, currentState.balls);
+    else drawTable();
+});
 (async () => {
     await fetchGeometry();
     drawTable();
