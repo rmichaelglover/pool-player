@@ -23,7 +23,7 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, '..', 'shared'))
 from pool_sim import simulate_shot
 from shot_enumerator import (generate_legal_shots, generate_defensive_shots,
-                              generate_kick_shots,
+                              generate_kick_shots, generate_combination_shots,
                               POCKETS, POCKET_NAMES,
                               POCKET_RADII, R, LegalShot)
 from rack_geometry import RACK_APEX, RACK_POSITIONS
@@ -293,6 +293,11 @@ class EightBallEnv:
                                         skip_blocking=True)
         my_ids = self._my_ball_ids()
         own_shots = [s for s in all_shots if s.ball_id in my_ids]
+        # Add 2-ball combinations into the action space (own group only). They
+        # compete with direct/bank shots so search can choose a combo when it
+        # beats the alternatives — the net learns when, no heuristic preference.
+        own_shots += generate_combination_shots(self.cue, self.balls,
+                                                 list(my_ids))
         if own_shots:
             return own_shots
         wide = generate_legal_shots(self.cue, self.balls, max_cut_deg=89.0,
@@ -660,21 +665,18 @@ class EightBallEnv:
         return x, y
 
     def _placement_reward(self, x, y):
-        target_ids = self._my_ball_ids() or None
-        if self._on_8ball():
-            target_ids = {8}
+        # Thin RULE-FLOOR only — no hand-coded strategy prior. We deliberately
+        # do NOT score placement "quality" (easiest cut, shape, options): that
+        # is left to the value head / search / game outcome to learn, so novel
+        # placements can emerge instead of being clamped to a human heuristic
+        # (see feedback_avoid_heuristics). The only signal is a small penalty
+        # for placing yourself with no legal shot at all — a wasted ball-in-hand,
+        # which is closer to a rules/degeneracy floor than a strategy judgment.
         shots = generate_legal_shots((x, y), self.balls, max_cut_deg=80.0,
                                       include_banks=True)
         if not shots:
-            return -0.15
-        if target_ids:
-            own = [s for s in shots if s.ball_id in target_ids]
-            if own:
-                easiest = min(own, key=lambda s: s.cut_angle_deg)
-                ease = max(0.0, 1.0 - easiest.cut_angle_deg / 90.0)
-                return 0.05 * ease + 0.01 * min(len(own), 5) / 5.0
-            return -0.05
-        return 0.02 * min(len(shots), 10) / 10.0
+            return -0.30
+        return 0.0
 
     def _handle_foul(self, reason, obs):
         self.consecutive_fouls[self.current_player] += 1

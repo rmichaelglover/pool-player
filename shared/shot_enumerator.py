@@ -44,13 +44,16 @@ class LegalShot:
     reflection_point: tuple | None = None
     is_defensive: bool = False    # tier-2: legal contact only, no pocket attempt
     is_kick: bool = False         # tier-3: cue ball banks off a rail to reach target
+    is_combo: bool = False        # cue→ball_id→combo_second_id→pocket
+    combo_second_id: int = -1     # the SECOND ball (the one pocketed) in a combo
 
     @property
     def difficulty(self) -> float:
         cut_factor = 1.0 / max(0.1, math.cos(math.radians(self.cut_angle_deg)))
         total_dist = self.cue_to_ghost_dist + self.ball_to_pocket_dist
         base = cut_factor * (total_dist / 20.0)
-        return base * (1.8 if self.is_bank else 1.0)
+        mult = 1.8 if self.is_bank else (2.0 if self.is_combo else 1.0)
+        return base * mult
 
 
 def ghost_ball(ball_pos, pocket_pos):
@@ -300,6 +303,84 @@ def generate_bank_shots(cue_pos, balls, max_cut_deg=70.0, min_pocket_dist=1.0):
                     reflection_point=refl,
                 ))
     return shots
+
+
+def generate_combination_shots(cue_pos, balls, target_ids, max_cut_deg=65.0,
+                               min_pocket_dist=1.0, max_combos=12):
+    """Enumerate 2-ball combination shots: the cue strikes ball A (first
+    contact), driving ball B into a pocket — A→B→pocket.
+
+    Both A and B are drawn from target_ids (the player's own group), so the
+    first contact is always legal and the pocketed ball is always ours. Mirrors
+    the direct-shot geometry, two-staged:
+        ghostB = where A's CENTER must be at contact to send B → pocket
+        ghostA = where the CUE's center must be at contact to send A → ghostB
+    A shot is kept only if all three corridors are clear (cue→ghostA,
+    A→ghostB, B→pocket), both cut angles are within max_cut_deg, both ghosts
+    are on the table, and the cue is on the strikeable side of A.
+
+    This only puts combos in the ACTION SPACE — it does not score or prefer
+    them. Value-search and distillation decide when a combo beats the
+    alternatives, so good (and possibly novel) combos can emerge on their own.
+    """
+    shots = []
+    cue_t = tuple(cue_pos)
+    ball_map = {bid: tuple(pos) for bid, pos in balls.items()}
+    tgt = [b for b in target_ids if b in ball_map]
+
+    for b_id in tgt:                      # B = the ball that drops
+        posB = ball_map[b_id]
+        for p_idx, pocket_pos in enumerate(POCKETS):
+            if math.hypot(pocket_pos[0] - posB[0],
+                          pocket_pos[1] - posB[1]) < min_pocket_dist:
+                continue
+            if _segment_blocked(posB, pocket_pos, ball_map, exclude_ids=[b_id]):
+                continue
+            ghostB = ghost_ball(posB, pocket_pos)   # A's center at B-contact
+            if not _ghost_on_table(ghostB):
+                continue
+            for a_id in tgt:              # A = first ball the cue strikes
+                if a_id == b_id:
+                    continue
+                posA = ball_map[a_id]
+                cutB = cut_angle_deg(posA, ghostB, posB, pocket_pos)
+                if cutB > max_cut_deg:
+                    continue
+                ghostA = ghost_ball(posA, ghostB)   # cue center at A-contact
+                if not _ghost_on_table(ghostA):
+                    continue
+                # Cue must be on the side of A that drives it toward ghostB.
+                bpx, bpy = posA[0] - ghostA[0], posA[1] - ghostA[1]
+                cgx, cgy = ghostA[0] - cue_t[0], ghostA[1] - cue_t[1]
+                if bpx * cgx + bpy * cgy <= 0:
+                    continue
+                cutA = cut_angle_deg(cue_t, ghostA, posA, ghostB)
+                if cutA > max_cut_deg:
+                    continue
+                # Corridors: cue→ghostA (B may block), A→ghostB, B→pocket(done).
+                if _segment_blocked(cue_t, ghostA, ball_map, exclude_ids=[a_id]):
+                    continue
+                if _segment_blocked(posA, ghostB, ball_map,
+                                    exclude_ids=[a_id, b_id]):
+                    continue
+                aim = math.atan2(ghostA[1] - cue_t[1], ghostA[0] - cue_t[0])
+                shots.append(LegalShot(
+                    ball_id=a_id,                   # first contact → legality
+                    pocket_idx=p_idx,               # where B drops
+                    aim_point=ghostB,               # cue sends A toward ghostB
+                    ghost_pos=ghostA,
+                    aim_angle=aim,
+                    cut_angle_deg=max(cutA, cutB),
+                    cue_to_ghost_dist=math.hypot(cgx, cgy),
+                    ball_to_pocket_dist=(
+                        math.hypot(ghostB[0] - posA[0], ghostB[1] - posA[1])
+                        + math.hypot(pocket_pos[0] - posB[0],
+                                     pocket_pos[1] - posB[1])),
+                    is_combo=True,
+                    combo_second_id=b_id,
+                ))
+    shots.sort(key=lambda s: s.difficulty)
+    return shots[:max_combos]
 
 
 def generate_legal_shots(cue_pos, balls, max_cut_deg=80.0, min_pocket_dist=1.0,
