@@ -262,6 +262,9 @@ def shot_search_distill(
     device: str = 'cpu',
     noise_samples: int = 1,
     include_safety: bool = True,
+    search_depth: int = 1,
+    opp_K: int = 4,
+    opp_M: int = 1,
 ):
     """Like shot_search_eight_ball but returns enriched info for search-
     augmented (distillation) training:
@@ -271,6 +274,18 @@ def shot_search_distill(
                      (key == n_legal is the safety action) — soft policy target
         best_q:      mean Q of the best candidate — value target (already in
                      my perspective, ∈ roughly [-1, 1+])
+
+    search_depth controls opponent-reply lookahead (Variant A negamax):
+        1 (default): evaluate the opponent's resulting state with the value
+            head — 1 - V(s'). Cheap, but trusts V blindly.
+        2: when a candidate passes the turn to the opponent, run a depth-1
+            search of the OPPONENT's best reply from s' and use that instead
+            of the bare value head, so a shot that leaves the opponent an easy
+            runout is correctly devalued. opp_K / opp_M bound the opponent's
+            branching (kept small — we only need a coarse best response).
+        Recursion only fires on turn-SWITCH states (Variant A). Continuation
+        states (same mover) still use the value head; placement/no-shot child
+        states fall back to the value head too.
     """
     if env.awaiting_placement or not obs.shot_meta:
         return None, {}, 0.0
@@ -340,6 +355,21 @@ def shot_search_distill(
         else:
             v = float(next_values[nt_pos])
             nt_pos += 1
+            # Depth-2 (Variant A): on turn-switch, replace the value head's
+            # guess of the opponent's state with a depth-1 search of the
+            # opponent's BEST reply. opp_best_q is in the opponent's
+            # perspective, so 1 - opp_best_q is my resulting win prob.
+            if search_depth >= 2 and switched:
+                opp_obs = env_c.get_obs()
+                if opp_obs.shot_meta and not env_c.awaiting_placement:
+                    _, _, opp_best_q = shot_search_distill(
+                        net, env_c, opp_obs,
+                        K_shots=opp_K, M_per_shot=opp_M, gamma=gamma,
+                        device=device, noise_samples=1,
+                        include_safety=include_safety,
+                        search_depth=search_depth - 1, opp_K=opp_K, opp_M=opp_M)
+                    v = opp_best_q
+                # else: placement / no-legal-shot child — keep value-head v
             q = r + gamma * ((1.0 - v) if switched else v)
         candidate_qs[ci].append(q)
 

@@ -62,6 +62,7 @@ def _load_warm(net, warm_start, device):
 def train_distill(num_envs=6, device_name='cpu', max_iters=200,
                   tag='8ball_v6_distill', lr=1e-4, steps_per_iter=24,
                   search_k=4, search_m=1, search_mc=1, gamma=0.99,
+                  search_depth=1, opp_k=4, opp_m=1,
                   softmax_temp=1.0, ce_weight=1.0, mse_force_weight=0.1,
                   mse_spin_weight=0.1, value_weight=0.5, entropy_weight=0.005,
                   log_std_min=-3.0, warm_start=None, env_kwargs=None,
@@ -78,6 +79,7 @@ def train_distill(num_envs=6, device_name='cpu', max_iters=200,
           flush=True)
     print(f'config: tag={tag} lr={lr} steps={steps_per_iter} envs={num_envs} '
           f'K={search_k} M={search_m} MC={search_mc} gamma={gamma} '
+          f'depth={search_depth} oppK={opp_k} oppM={opp_m} '
           f'(ce={ce_weight} mse_f={mse_force_weight} mse_s={mse_spin_weight} '
           f'v={value_weight} ent={entropy_weight})', flush=True)
 
@@ -138,7 +140,8 @@ def train_distill(num_envs=6, device_name='cpu', max_iters=200,
 
                 ba, action_qs, best_q = shot_search_distill(
                     net, env, obs, K_shots=search_k, M_per_shot=search_m,
-                    noise_samples=search_mc, gamma=gamma, device=device)
+                    noise_samples=search_mc, gamma=gamma, device=device,
+                    search_depth=search_depth, opp_K=opp_k, opp_M=opp_m)
 
                 if ba is None or not action_qs:
                     # No legal shots — forced step, no target.
@@ -302,6 +305,14 @@ def main():
     p.add_argument('--search_k', type=int, default=4)
     p.add_argument('--search_m', type=int, default=1)
     p.add_argument('--search_mc', type=int, default=1)
+    p.add_argument('--search_depth', type=int, default=1,
+                   help='1 = depth-1 (value head). 2 = opponent-reply search '
+                        '(Variant A): search the opponent best reply on '
+                        'turn-switch states instead of trusting V.')
+    p.add_argument('--search_k2', type=int, default=4,
+                   help='Opponent-reply branching (top-K shots) at depth 2')
+    p.add_argument('--search_m2', type=int, default=1,
+                   help='Opponent-reply force/spin perturbations at depth 2')
     p.add_argument('--softmax_temp', type=float, default=1.0)
     p.add_argument('--ce_weight', type=float, default=1.0)
     p.add_argument('--mse_force_weight', type=float, default=0.1)
@@ -329,6 +340,7 @@ def main():
         num_envs=args.envs, device_name=args.device, max_iters=args.iters,
         tag=args.tag, lr=args.lr, steps_per_iter=args.steps,
         search_k=args.search_k, search_m=args.search_m, search_mc=args.search_mc,
+        search_depth=args.search_depth, opp_k=args.search_k2, opp_m=args.search_m2,
         gamma=args.gamma, softmax_temp=args.softmax_temp,
         ce_weight=args.ce_weight, mse_force_weight=args.mse_force_weight,
         mse_spin_weight=args.mse_spin_weight, value_weight=args.value_weight,
