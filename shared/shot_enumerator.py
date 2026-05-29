@@ -555,17 +555,27 @@ def generate_defensive_shots(cue_pos, balls, target_ids, min_target_dist=4 * R):
 
 
 def generate_kick_shots(cue_pos, balls, target_ids, min_target_dist=4 * R,
-                         skip_blocking=False):
+                         skip_blocking=False, first_contact_only=False):
     """Tier-3 shots: cue ball banks off one rail to make legal contact with
     each reachable target ball. Used when even tier-2 (direct defensive)
     is blocked. Mirror the target across each rail, find the reflection
     point where cue→mirror crosses the rail, and emit one shot per
-    (target, rail) pair whose cue→reflection→target path is clear.
+    (target, rail) pair.
 
-    skip_blocking=True relaxes the line-of-sight checks so the env still
-    gets *some* action to simulate in genuinely stuck positions (the
-    simulation will likely foul on the blocker, but the player at least
-    attempts the kick rather than doing nothing).
+    A kick is a FOUL-AVOIDANCE shot, not a pocket attempt: when snookered the
+    goal is to contact your own ball first (then drive a ball to a rail), not
+    to pocket. So there are three line-of-sight tiers, tried in order:
+
+      default (full clearance): cue→reflection and reflection→target both clear
+          of every other ball. The clean, pocketable kick.
+      first_contact_only=True: the cue must reach the first rail WITHOUT
+          striking an illegal-first-contact ball (any ball not in target_ids —
+          opponents, and the 8 when not on it). Own-group balls in the path are
+          fine (still legal contact), and the post-rail path is NOT required to
+          be clear. This is the foul-avoidance kick: legal contact is the win.
+      skip_blocking=True: last resort — no line-of-sight checks at all, so the
+          engine always has an action even in genuinely snookered positions
+          where every kick fouls on an opponent before the rail.
     """
     shots: list[LegalShot] = []
     cue_t = tuple(cue_pos)
@@ -580,7 +590,17 @@ def generate_kick_shots(cue_pos, balls, target_ids, min_target_dist=4 * R,
             refl = _bank_reflection_point(cue_t, mirror_target, cushion)
             if refl is None:
                 continue
-            if not skip_blocking:
+            if skip_blocking:
+                pass  # last resort: emit even fouling kicks (see docstring)
+            elif first_contact_only:
+                # Foul-avoidance tier: the cue must reach the first rail without
+                # striking an illegal-first-contact ball (any ball not in
+                # target_ids). Own-group balls in the path are fine, and the
+                # post-rail path is not required to be clear.
+                illegal = {b: p for b, p in ball_map.items() if b not in target_ids}
+                if _segment_blocked(cue_t, refl, illegal):
+                    continue
+            else:
                 if _segment_blocked(cue_t, refl, ball_map, exclude_ids=[ball_id]):
                     continue
                 if _segment_blocked(refl, ball_pos, ball_map, exclude_ids=[ball_id]):

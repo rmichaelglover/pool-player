@@ -271,6 +271,10 @@ class EightBallEnv:
             kicks = generate_kick_shots(self.cue, self.balls, target_ids)
             if kicks:
                 return kicks
+            kicks = generate_kick_shots(self.cue, self.balls, target_ids,
+                                         first_contact_only=True)
+            if kicks:
+                return kicks
             return generate_kick_shots(self.cue, self.balls, target_ids,
                                         skip_blocking=True)
 
@@ -287,6 +291,10 @@ class EightBallEnv:
             if defensive:
                 return defensive
             kicks = generate_kick_shots(self.cue, self.balls, [8])
+            if kicks:
+                return kicks
+            kicks = generate_kick_shots(self.cue, self.balls, [8],
+                                         first_contact_only=True)
             if kicks:
                 return kicks
             return generate_kick_shots(self.cue, self.balls, [8],
@@ -309,6 +317,10 @@ class EightBallEnv:
         if defensive:
             return defensive
         kicks = generate_kick_shots(self.cue, self.balls, list(my_ids))
+        if kicks:
+            return kicks
+        kicks = generate_kick_shots(self.cue, self.balls, list(my_ids),
+                                     first_contact_only=True)
         if kicks:
             return kicks
         return generate_kick_shots(self.cue, self.balls, list(my_ids),
