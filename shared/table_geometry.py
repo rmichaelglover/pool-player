@@ -144,33 +144,41 @@ def optimal_pocket_aim(ball_pos, idx: int, n_samples: int = 64):
     endpoints with at least BALL_R perpendicular clearance, or None if no
     feasible direct aim exists.
 
-    Binding endpoints (matched to the simulator's actual collision rules):
-      - Side pockets: all four corridor corners (cushion-line endpoints +
-        cushion-back endpoints). The converging facings narrow the corridor.
-      - Corner pockets: cushion-line endpoints only. Cushion-back endpoints
-        are facing endpoints that the simulator skips for bounces, and the
-        corner drop circle captures the ball before it reaches them anyway.
+    Binding endpoints: the entry gate is the two front cushion noses (mouth
+    jaws) for BOTH pocket types. A ball is captured the instant its center
+    crosses the mouth between those noses — it drops there and never travels to
+    the rear (cushion-back) facings, so those must NOT constrain a ball entering
+    from the table. (Earlier code added the rear facings for side pockets, which
+    spuriously rejected makeable angled cuts — see jaw_clip_13_bside.png.)
 
-    Implementation: sweep s along the cushion-back chord (full [0, 1] for
-    corners; inset by BALL_R/L for sides where the chord clearance also
-    binds), pick the s that maximizes the minimum perpendicular distance.
+    Implementation: sweep s along an aim chord and pick the s that maximizes the
+    minimum perpendicular distance to the mouth jaws. Corners sweep the
+    cushion-back chord (their drop circle is deep, so the back chord is the
+    natural target); side pockets sweep the opening at mid-depth, inset by
+    BALL_R so the ball center stays clear of each jaw.
     """
     bx, by = ball_pos
     fa_idx, fb_idx = _POCKET_FACING_PAIRS[idx]
     fa = FACINGS[fa_idx]; fb = FACINGS[fb_idx]
-    Ax, Ay = fa[2], fa[3]      # cushion-back endpoint of facing A
-    Cx, Cy = fb[2], fb[3]      # cushion-back endpoint of facing C
-    AC_dx = Cx - Ax; AC_dy = Cy - Ay
-    L_back = math.hypot(AC_dx, AC_dy)
-    if L_back < 1e-9:
-        return None
-
+    # Entry gate = front mouth jaws only, for both pocket types.
+    endpoints = ((fa[0], fa[1]), (fb[0], fb[1]))
     if idx in _SIDE_POCKETS:
-        endpoints = ((fa[0], fa[1]), (fb[0], fb[1]), (Ax, Ay), (Cx, Cy))
+        # Aim across the opening at mid-depth (between mouth and rear facings).
+        Ax, Ay = (fa[0] + fa[2]) / 2.0, (fa[1] + fa[3]) / 2.0
+        Cx, Cy = (fb[0] + fb[2]) / 2.0, (fb[1] + fb[3]) / 2.0
+        AC_dx = Cx - Ax; AC_dy = Cy - Ay
+        L_back = math.hypot(AC_dx, AC_dy)
+        if L_back < 1e-9:
+            return None
         s_min = BALL_R / L_back
         s_max = 1.0 - s_min
     else:
-        endpoints = ((fa[0], fa[1]), (fb[0], fb[1]))
+        Ax, Ay = fa[2], fa[3]      # cushion-back endpoint of facing A
+        Cx, Cy = fb[2], fb[3]      # cushion-back endpoint of facing C
+        AC_dx = Cx - Ax; AC_dy = Cy - Ay
+        L_back = math.hypot(AC_dx, AC_dy)
+        if L_back < 1e-9:
+            return None
         s_min = 0.0
         s_max = 1.0
     if s_min >= s_max:
@@ -210,13 +218,16 @@ def optimal_pocket_aim(ball_pos, idx: int, n_samples: int = 64):
     return best_q
 
 
-def pocket_aim_candidates(ball_pos, idx: int, n: int = 3, n_samples: int = 64):
+def pocket_aim_candidates(ball_pos, idx: int, n: int = 5, n_samples: int = 64):
     """Return up to `n` aim points (≥ BALL_R corridor clearance) spread across
     the feasible chord range for pocket `idx`. For corner pockets, returns the
     single optimal aim wrapped in a list (the wide mouth rarely benefits from
-    multiple candidates). For side pockets, returns up to `n` candidates so
-    that downstream checks (line-of-sight, cut angle) get multiple chances
-    to find a legal shot.
+    multiple candidates). For side pockets, returns up to `n` candidates spread
+    across the opening at mid-depth, so the policy gets several aim options
+    (and downstream line-of-sight / cut-angle checks several chances).
+
+    Entry is gated by the two front mouth jaws only — a ball is captured at the
+    mouth and never reaches the rear facings (see optimal_pocket_aim).
     """
     if idx not in _SIDE_POCKETS:
         opt = optimal_pocket_aim(ball_pos, idx, n_samples=n_samples)
@@ -225,14 +236,16 @@ def pocket_aim_candidates(ball_pos, idx: int, n: int = 3, n_samples: int = 64):
     bx, by = ball_pos
     fa_idx, fb_idx = _POCKET_FACING_PAIRS[idx]
     fa = FACINGS[fa_idx]; fb = FACINGS[fb_idx]
-    Ax, Ay = fa[2], fa[3]
-    Cx, Cy = fb[2], fb[3]
+    # Aim across the opening at mid-depth (between mouth and rear facings).
+    Ax, Ay = (fa[0] + fa[2]) / 2.0, (fa[1] + fa[3]) / 2.0
+    Cx, Cy = (fb[0] + fb[2]) / 2.0, (fb[1] + fb[3]) / 2.0
     AC_dx = Cx - Ax; AC_dy = Cy - Ay
     L_back = math.hypot(AC_dx, AC_dy)
     if L_back < 1e-9:
         return []
 
-    endpoints = ((fa[0], fa[1]), (fb[0], fb[1]), (Ax, Ay), (Cx, Cy))
+    # Entry gate: the two front mouth jaws only.
+    endpoints = ((fa[0], fa[1]), (fb[0], fb[1]))
     s_min = BALL_R / L_back
     s_max = 1.0 - s_min
     if s_min >= s_max:

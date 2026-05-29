@@ -19,7 +19,7 @@ from table_geometry import (TABLE_LENGTH, TABLE_WIDTH, BALL_R as R,
                               POCKETS, POCKET_NAMES, CUSHIONS, FACINGS,
                               CORNER_RAIL_OFFSET, SIDE_HALF, pocket_captures,
                               optimal_pocket_aim, pocket_aim_candidates,
-                              _POCKET_FACING_PAIRS, _SIDE_POCKETS)
+                              _POCKET_FACING_PAIRS)
 
 # Backward-compat: some older callers expect a per-pocket radius (was used
 # only as a corner/side flag — corner if radius < 2.6). Geometry is no
@@ -165,10 +165,10 @@ def _bank_pocket_feasible(approach_pos, pocket_idx):
     bx, by = approach_pos
     fa_idx, fb_idx = _POCKET_FACING_PAIRS[pocket_idx]
     fa = FACINGS[fa_idx]; fb = FACINGS[fb_idx]
-    if pocket_idx in _SIDE_POCKETS:
-        endpoints = ((fa[0], fa[1]), (fb[0], fb[1]), (fa[2], fa[3]), (fb[2], fb[3]))
-    else:
-        endpoints = ((fa[0], fa[1]), (fb[0], fb[1]))
+    # Entry gate = front mouth jaws only, for both pocket types. The ball is
+    # captured at the mouth and never reaches the rear facings, so they must not
+    # constrain entry (matches optimal_pocket_aim / pocket_aim_candidates).
+    endpoints = ((fa[0], fa[1]), (fb[0], fb[1]))
     px, py = POCKETS[pocket_idx]
     dx, dy = px - bx, py - by
     d_len = math.hypot(dx, dy)
